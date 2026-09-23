@@ -2979,18 +2979,19 @@ export const SETTINGS_SCHEMA = {
 	"memories.summaryInjectionTokenLimit": { type: "number", default: 5000 },
 
 	// Memory backend selector — picks between local memories pipeline,
-	// Mnemopi local SQLite, Hindsight remote memory, Sharpshooter project
-	// decisions, or off. The legacy
+	// Mnemopi local SQLite, Hindsight remote memory, Dakera remote memory,
+	// Sharpshooter project decisions, or off. The legacy
 	// `memories.enabled` flag is migration input only; see config/settings.ts.
 	"memory.backend": {
 		type: "enum",
-		values: ["off", "local", "hindsight", "mnemopi", "sharpshooter"] as const,
+		values: ["off", "local", "hindsight", "mnemopi", "sharpshooter", "dakera"] as const,
 		default: "off",
 		ui: {
 			tab: "memory",
 			group: "General",
 			label: "Memory Backend",
-			description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Sharpshooter",
+			description:
+				"Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, Dakera remote memory, or Sharpshooter",
 			options: [
 				{ value: "off", label: "Off", description: "No memory subsystem runs" },
 				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
@@ -3005,6 +3006,11 @@ export const SETTINGS_SCHEMA = {
 					label: "Sharpshooter",
 					description:
 						"Friction-gated project decision files (architecture/product/style), consolidated in the background",
+				},
+				{
+					value: "dakera",
+					label: "Dakera",
+					description: "Dakera self-hosted remote memory service (isolated by agent_id)",
 				},
 			],
 		},
@@ -3456,6 +3462,147 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 	"hindsight.mentalModelMaxRenderChars": { type: "number", default: 16_000 },
+
+	// Dakera (https://dakera.ai) — self-hosted remote memory. There is no bank
+	// concept: isolation is the `agent_id`, so the Hindsight bank/scoping knobs
+	// collapse into an agent-id scheme (see dakera/bank.ts). Dakera's recall
+	// cannot filter by tags, which is why `per-project-tagged` is not offered.
+	"dakera.apiUrl": {
+		type: "string",
+		default: "http://localhost:3000",
+		ui: {
+			tab: "memory",
+			group: "Dakera",
+			label: "Dakera API URL",
+			description: "Dakera server URL (plain HTTP or TLS, depending on your deployment)",
+			condition: "dakeraActive",
+		},
+	},
+
+	"dakera.apiToken": {
+		type: "string",
+		credential: true,
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Dakera",
+			label: "Dakera API Token",
+			description: "Bearer token for the Dakera REST API",
+			condition: "dakeraActive",
+		},
+	},
+
+	"dakera.agentId": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Dakera",
+			label: "Dakera Agent ID",
+			description: "Memory isolation key (default: omp, plus a project segment in per-project mode)",
+			condition: "dakeraActive",
+		},
+	},
+
+	"dakera.agentIdPrefix": { type: "string", default: undefined },
+	"dakera.scoping": {
+		type: "enum",
+		values: ["global", "per-project"] as const,
+		default: "per-project",
+		ui: {
+			tab: "memory",
+			group: "Dakera",
+			label: "Dakera Scoping",
+			description:
+				"global = one shared agent_id; per-project = isolated agent_id per repository. Tag filtering is not available on recall, so there is no shared-bank-with-tags mode",
+			options: [
+				{
+					value: "global",
+					label: "Global",
+					description: "One shared agent_id — every project sees the same memories",
+				},
+				{
+					value: "per-project",
+					label: "Per project",
+					description: "Isolated agent_id per repository — projects cannot see each other's memories",
+				},
+			],
+			condition: "dakeraActive",
+		},
+	},
+
+	"dakera.autoRecall": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Dakera",
+			label: "Dakera Auto Recall",
+			description: "Recall memories on the first turn of each session",
+			condition: "dakeraActive",
+		},
+	},
+	"dakera.autoRetain": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Dakera",
+			label: "Dakera Auto Retain",
+			description: "Store the transcript every N user turns",
+			condition: "dakeraActive",
+		},
+	},
+
+	"dakera.retainMode": {
+		type: "enum",
+		values: ["full-session", "last-turn"] as const,
+		default: "full-session",
+		ui: {
+			tab: "memory",
+			group: "Dakera",
+			label: "Dakera Retain Mode",
+			description: "full-session = one growing episodic memory per session, last-turn = chunked",
+			options: [
+				{
+					value: "full-session",
+					label: "Full session",
+					description: "Store the whole transcript as one episodic memory per session",
+				},
+				{ value: "last-turn", label: "Last turn", description: "Chunked retention sliced by turn boundaries" },
+			],
+			condition: "dakeraActive",
+		},
+	},
+	"dakera.retainEveryNTurns": { type: "number", default: 3 },
+	"dakera.retainImportance": { type: "number", default: 0.5 },
+
+	"dakera.recallTopK": { type: "number", default: 8 },
+	// Dakera raises a memory's importance every time it is read, so this is a
+	// floor on stored values, not a stable relevance threshold.
+	"dakera.recallMinImportance": { type: "number", default: 0 },
+	"dakera.recallRerank": { type: "boolean", default: true },
+	"dakera.recallContextTurns": { type: "number", default: 1 },
+	"dakera.recallMaxQueryChars": { type: "number", default: 800 },
+
+	"dakera.reflectModel": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Dakera",
+			label: "Dakera Reflect Model",
+			description: "Model selector for the synthesised `reflect` answer, empty = smol role, then default",
+			condition: "dakeraActive",
+		},
+	},
+
+	"dakera.debug": { type: "boolean", default: false },
+
+	"dakera.requestTimeoutMs": { type: "number", default: 30_000 },
+	"dakera.recallTimeoutMs": { type: "number", default: 30_000 },
+	"dakera.retainTimeoutMs": { type: "number", default: 60_000 },
+	"dakera.reflectTimeoutMs": { type: "number", default: 120_000 },
 
 	// TTSR
 	"ttsr.enabled": {

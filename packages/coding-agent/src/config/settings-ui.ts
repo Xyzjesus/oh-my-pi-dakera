@@ -47,6 +47,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	dakeraActive: () => {
+		try {
+			return Settings.instance.get("memory.backend") === "dakera";
+		} catch {
+			return false;
+		}
+	},
 	autolearnActive: () => {
 		try {
 			return Settings.instance.get("autolearn.enabled") === true;

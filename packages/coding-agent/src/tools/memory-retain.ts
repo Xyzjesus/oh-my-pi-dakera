@@ -1,6 +1,7 @@
 import type { MemoryRetainDetails } from "@oh-my-pi/pi-tui/tools/memory";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { isDakeraConfigured, loadDakeraConfig } from "../dakera/config";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import retainDescription from "../prompts/tools/retain.md" with { type: "text" };
 import type { ToolSession } from ".";
@@ -30,13 +31,32 @@ export class MemoryRetainTool implements AgentTool<typeof memoryRetainSchema, Me
 
 	static createIf(session: ToolSession): MemoryRetainTool | null {
 		const backend = session.settings.get("memory.backend");
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "dakera") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
+		if (backend === "dakera" && !isDakeraConfigured(loadDakeraConfig(session.settings))) return null;
 		return new MemoryRetainTool(session);
 	}
 
 	async execute(_id: string, params: MemoryRetainParams): Promise<AgentToolResult<MemoryRetainDetails>> {
 		const backend = this.session.settings.get("memory.backend");
+		if (backend === "dakera") {
+			const state = this.session.getDakeraSessionState?.();
+			if (!state) {
+				throw new Error("Dakera backend is not initialised for this session.");
+			}
+
+			// Dakera has no local queue: the batch is stored before the call returns,
+			// so the model is told the truth about what already happened.
+			const count = await state.retainItems(
+				params.items.map(item => ({ content: item.content, context: item.context })),
+			);
+			const noun = count === 1 ? "memory" : "memories";
+			return {
+				content: [{ type: "text", text: `${count} ${noun} stored.` }],
+				details: { count },
+			};
+		}
+
 		if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();
 			if (!state) {

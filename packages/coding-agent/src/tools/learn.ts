@@ -1,6 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
+import { isDakeraConfigured, loadDakeraConfig } from "../dakera/config";
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { localBackend } from "../memory-backend/local-backend";
@@ -45,8 +46,9 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 	static createIf(session: ToolSession): LearnTool | null {
 		if (!session.settings.get("autolearn.enabled")) return null;
 		const backend = session.settings.get("memory.backend");
-		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local") return null;
+		if (!["hindsight", "mnemopi", "dakera", "local"].includes(backend)) return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
+		if (backend === "dakera" && !isDakeraConfigured(loadDakeraConfig(session.settings))) return null;
 		return new LearnTool(session);
 	}
 
@@ -54,7 +56,17 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 		// 1) Persist or queue the lesson to long-term memory (mirrors MemoryRetainTool).
 		const backend = this.session.settings.get("memory.backend");
 		let memoryMessage = "Lesson stored";
-		if (backend === "mnemopi") {
+		if (backend === "dakera") {
+			const state = this.session.getDakeraSessionState?.();
+			if (!state) {
+				throw new Error("Dakera backend is not initialised for this session.");
+			}
+			const stored = await state.retainItems([{ content: params.memory, context: params.context, importance: 0.8 }]);
+			// Mirrors the mnemopi branch: a dropped lesson must not mint a skill.
+			if (stored === 0) {
+				throw new Error("Dakera did not store the lesson (no memory id returned).");
+			}
+		} else if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();
 			if (!state) {
 				throw new Error("Mnemopi backend is not initialised for this session.");

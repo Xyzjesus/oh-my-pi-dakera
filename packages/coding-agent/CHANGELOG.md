@@ -154,6 +154,17 @@
 
 ### Added
 
+- Added `memory.backend: dakera` for self-hosted [Dakera](https://dakera.ai) memory: automatic recall on the first turn and transcript retention on agent end, working `recall`, `retain`, and client-synthesized `reflect`, per-repository or global `agent_id` scoping (pinnable per repository with `dakera.agentId` in `.omp/config.yml`), and `DAKERA_*` overrides for every `dakera.*` setting but `agentIdPrefix`.
+- Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+- Customize the system prompt with Handlebars using live settings and tool data via `SYSTEM_TEMPLATE.md`, `--system-prompt-template`, or the SDK ([#12194](https://github.com/can1357/oh-my-pi/pull/12194) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+### Fixed
+
+- Fixed contradictory `systemPromptTemplate` and `customSystemPrompt` options being accepted with a fixed full `systemPrompt` replacement, including empty values ([#12194](https://github.com/can1357/oh-my-pi/pull/12194) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Added `Target.getTargets` to the browser relay's CDP surface so clients can enumerate eligible pages without attaching to or claiming them.
+- Added image, web, speech, dictation, judge, and memory model roles with ordered fallbacks, automatic migration of legacy backend settings, and `omp models --kind` filtering.
+- Added native OpenRouter image generation and model-selected web-plugin search, plus live TypeSafe judge-model discovery.
+- Fixed Codex rejecting the sloppy edit tool's grammar.
 - Added `find` tool for semantic workspace searching, allowing agents to locate behaviors and symbols using natural language
 - Added `find` CLI command for performing semantic workspace searches
 - Added batch evaluation with judge_batch(states, questions) / judgeBatch(...), including bounded background execution, incremental result and status access, per-item failure reporting, and the ability to wait for or reattach to jobs across turns or after a reset.

@@ -117,6 +117,7 @@ import {
 	onExtendedContextChanged,
 	onModelRolesChanged,
 } from "../config/settings";
+import { getDakeraSessionState, setDakeraSessionState, type DakeraSessionState } from "../dakera/state";
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
@@ -2249,6 +2250,10 @@ export class AgentSession {
 
 	getMnemopiSessionState(): MnemopiSessionState | undefined {
 		return getMnemopiSessionState(this);
+	}
+
+	getDakeraSessionState(): DakeraSessionState | undefined {
+		return getDakeraSessionState(this);
 	}
 
 	/** TTSR manager for time-traveling stream rules */
@@ -4906,6 +4911,9 @@ export class AgentSession {
 
 		const hindsightState = this.getHindsightSessionState();
 		const mnemopiState = setMnemopiSessionState(this, undefined);
+		// Dakera holds the only copy of a retain, so an in-flight transcript write
+		// must settle before the exit path tears the socket down (print mode).
+		const dakeraState = setDakeraSessionState(this, undefined);
 		// Bound the wait for a just-fired sharpshooter extraction before dropping
 		// its subscriptions, so print-mode exits don't cut queued-delta writes.
 		const sharpshooterFlushed = flushSharpshooterExtraction(this, options.mnemopiConsolidateTimeoutMs);
@@ -4924,6 +4932,11 @@ export class AgentSession {
 			this.#disconnectOwnedMcp(),
 			advisorRecorderClosed,
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
+			dakeraState?.awaitPending() ?? Promise.resolve(),
+			(async () => {
+				const summary = dakeraState?.buildClosingSummary();
+				if (summary) await dakeraState?.endSessionWithSummary(summary);
+			})(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
 			sharpshooterFlushed,
 		]);
@@ -4942,6 +4955,7 @@ export class AgentSession {
 		this.#maintenance.cancelSpeculation();
 		this.setHindsightSessionState(undefined);
 		hindsightState?.dispose();
+		dakeraState?.dispose();
 		this.#disconnectFromAgent();
 		if (this.#unsubscribeAppendOnly) {
 			this.#unsubscribeAppendOnly();

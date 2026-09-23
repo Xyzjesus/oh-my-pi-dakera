@@ -4,6 +4,7 @@ import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
+import { getDakeraSessionState, setDakeraSessionState } from "../dakera/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
@@ -78,6 +79,7 @@ export class SessionMemory {
 	rekeyForCurrentSessionId(): void {
 		this.#rekeyHindsightMemoryForCurrentSessionId();
 		this.#rekeyMnemopiMemoryForCurrentSessionId();
+		this.#rekeyDakeraMemoryForCurrentSessionId();
 	}
 
 	#rekeyHindsightMemoryForCurrentSessionId(): void {
@@ -92,6 +94,13 @@ export class SessionMemory {
 		const sid = this.#host.agent.sessionId;
 		if (!sid) return;
 		this.#host.getMnemopiSessionState()?.setSessionId(sid);
+	}
+
+	#rekeyDakeraMemoryForCurrentSessionId(): void {
+		if (this.#host.settings.get("memory.backend") !== "dakera") return;
+		const sid = this.#host.agent.sessionId;
+		if (!sid) return;
+		getDakeraSessionState(this.#host.memoryBackendSession())?.setSessionId(sid);
 	}
 
 	/** New transcript: reset Hindsight counters and reload its frozen mental-model snapshot. */
@@ -115,16 +124,25 @@ export class SessionMemory {
 		return true;
 	}
 
+	#resetDakeraConversationTrackingIfDakera(): boolean {
+		if (this.#host.settings.get("memory.backend") !== "dakera") return false;
+		const state = getDakeraSessionState(this.#host.memoryBackendSession());
+		if (!state) return false;
+		state.resetConversationTracking();
+		return true;
+	}
+
 	/** Resets transcript-scoped memory counters and removes a promoted prompt. */
 	async resetContextForNewTranscript(): Promise<void> {
 		const hadPromotedMemoryPrompt = this.#baseSystemPromptBeforeMemoryPromotion !== undefined;
 		const resetHindsight = this.#resetHindsightConversationTrackingIfHindsight();
 		const resetMnemopi = this.#resetMnemopiConversationTrackingIfMnemopi();
+		const resetDakera = this.#resetDakeraConversationTrackingIfDakera();
 		if (hadPromotedMemoryPrompt) {
 			this.#host.setBaseSystemPrompt(this.#baseSystemPromptBeforeMemoryPromotion!);
 			this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 		}
-		if (resetHindsight || resetMnemopi || hadPromotedMemoryPrompt) {
+		if (resetHindsight || resetMnemopi || resetDakera || hadPromotedMemoryPrompt) {
 			await this.#host.refreshBaseSystemPrompt();
 		}
 	}
@@ -173,6 +191,16 @@ export class SessionMemory {
 			} catch (error) {
 				logger.warn("Memory lifecycle: Mnemopi dispose failed", { error: String(error) });
 			}
+		}
+
+		const dakera = setDakeraSessionState(this.#host.memoryBackendSession(), undefined);
+		if (dakera) {
+			try {
+				await dakera.awaitPending();
+			} catch (error) {
+				logger.warn("Memory lifecycle: Dakera drain failed", { error: String(error) });
+			}
+			dakera.dispose();
 		}
 	}
 
