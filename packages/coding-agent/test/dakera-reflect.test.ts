@@ -3,7 +3,7 @@ import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock"
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { DakeraMemoryType, DakeraRecallHit } from "@oh-my-pi/pi-coding-agent/dakera/client";
-import { formatRecallHits, resolveDakeraModel } from "@oh-my-pi/pi-coding-agent/dakera/reflect";
+import { budgetRecallHits, formatRecallHits, resolveDakeraModel } from "@oh-my-pi/pi-coding-agent/dakera/reflect";
 
 const registryFor = (models: MockModel[]): ModelRegistry =>
 	({ getAll: () => models, getAvailable: () => models }) as unknown as ModelRegistry;
@@ -76,5 +76,24 @@ describe("formatRecallHits", () => {
 		]);
 
 		expect(rendered).toBe("the repo started as a spike\n\n(2027-01-15T08:00:00.000Z) deploy uses blue-green");
+	});
+});
+describe("budgetRecallHits", () => {
+	const bigRow = (id: string, size: number) => hit(id, "x".repeat(size), 1_800_000_000, "episodic");
+
+	// Uncapped, topK=8 hits of a 99k-char transcript ceiling could approach
+	// ~800k characters and overflow the reflect model's context window.
+	it("keeps best-ranked hits whole and drops the overflow", () => {
+		const kept = budgetRecallHits([bigRow("a", 30_000), bigRow("b", 20_000), bigRow("c", 20_000)]);
+		expect(kept.map(row => row.memory.id)).toEqual(["a", "b"]);
+	});
+
+	it("keeps a single hit even when it exceeds the budget", () => {
+		const kept = budgetRecallHits([bigRow("huge", 120_000)]);
+		expect(kept.map(row => row.memory.id)).toEqual(["huge"]);
+	});
+
+	it("passes an empty list through", () => {
+		expect(budgetRecallHits([])).toEqual([]);
 	});
 });

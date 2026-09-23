@@ -4932,10 +4932,13 @@ export class AgentSession {
 			this.#disconnectOwnedMcp(),
 			advisorRecorderClosed,
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
-			dakeraState?.awaitPending() ?? Promise.resolve(),
+			// Dakera: drain in-flight retains BEFORE closing the session row —
+			// a concurrent close could seal the row before the final write lands.
 			(async () => {
-				const summary = dakeraState?.buildClosingSummary();
-				if (summary) await dakeraState?.endSessionWithSummary(summary);
+				if (!dakeraState) return;
+				await dakeraState.awaitPending();
+				const summary = dakeraState.buildClosingSummary();
+				if (summary) await dakeraState.endSessionWithSummary(summary);
 			})(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
 			sharpshooterFlushed,

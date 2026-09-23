@@ -5,6 +5,7 @@ import { loadDakeraConfig } from "@oh-my-pi/pi-coding-agent/dakera/config";
 import { DakeraSessionState } from "@oh-my-pi/pi-coding-agent/dakera/state";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { asGlobalFetch } from "./helpers/fetch-mock";
 
 const NPM_TOKEN = `npm_${"a1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuVwXy".slice(0, 36)}`;
@@ -27,7 +28,11 @@ function serve(respond: (request: Captured) => unknown): void {
 				body: (init?.body === undefined ? {} : JSON.parse(String(init.body))) as Record<string, unknown>,
 			};
 			requests.push(captured);
-			return new Response(JSON.stringify(respond(captured) ?? {}), { status: 200 });
+			const reply = respond(captured) ?? {};
+			if (isRecord(reply) && typeof reply.status === "number") {
+				return new Response(JSON.stringify(reply.body ?? {}), { status: reply.status });
+			}
+			return new Response(JSON.stringify(reply), { status: 200 });
 		}),
 	);
 }
@@ -107,8 +112,10 @@ describe("DakeraSessionState.retainItems", () => {
 		expect(requests[1]?.url).toContain("/v1/memories/store/batch");
 	});
 	it("stores even when session registration fails", async () => {
+		// Return a real non-2xx (a thrown Error would be JSON-serialized into
+		// `{}` with HTTP 200 and never exercise the failure path).
 		serve(request =>
-			request.url.endsWith("/v1/sessions/start") ? new Error("no session api") : { stored: [{ id: "m1" }] },
+			request.url.endsWith("/v1/sessions/start") ? { status: 500, body: {} } : { stored: [{ id: "m1" }] },
 		);
 		expect(await stateFor().retainItems([{ content: "a fact" }])).toBe(1);
 	});
@@ -121,9 +128,17 @@ describe("DakeraSessionState.retainTranscript", () => {
 		{ role: "user" as const, content: "the newest fact" },
 	];
 
+	// A resumed process has no in-process transcript memory id, so the first
+	// full-session retain lists the agent's memories to recover the row the
+	// previous process maintained (the recovery GET returns no marker rows
+	// here). The test server answers every non-list call with an id.
 	it("maintains one full-session memory and updates it in place", async () => {
 		serve(request =>
-			request.method === "PUT" ? { memory: { id: "t1" } } : { stored: [{ id: "t1", content: "x" }] },
+			request.method === "PUT"
+				? { memory: { id: "t1" } }
+				: request.method === "GET"
+					? { memories: [] }
+					: { stored: [{ id: "t1", content: "x" }] },
 		);
 		const state = stateFor();
 
@@ -131,15 +146,20 @@ describe("DakeraSessionState.retainTranscript", () => {
 		await state.retainTranscript(messages);
 
 		const memoryCalls = requests.filter(r => !r.url.endsWith("/v1/sessions/start"));
-		expect(memoryCalls.map(request => request.method)).toEqual(["POST", "PUT"]);
-		expect(memoryCalls[1]?.url).toBe("http://dakera.local/v1/memory/update/t1?agent_id=omp");
+		// GET first: recovery lists memories before the initial store.
+		expect(memoryCalls.map(request => request.method)).toEqual(["GET", "POST", "PUT"]);
+		expect(memoryCalls[2]?.url).toBe("http://dakera.local/v1/memory/update/t1?agent_id=omp");
 	});
 
 	// After `/new` or a resume the old transcript memory belongs to another
 	// conversation; updating it would overwrite the wrong session.
 	it("stops updating the previous transcript memory after a session switch", async () => {
 		serve(request =>
-			request.method === "PUT" ? { memory: { id: "t1" } } : { stored: [{ id: "t1", content: "x" }] },
+			request.method === "PUT"
+				? { memory: { id: "t1" } }
+				: request.method === "GET"
+					? { memories: [] }
+					: { stored: [{ id: "t1", content: "x" }] },
 		);
 		const state = stateFor();
 
@@ -148,39 +168,50 @@ describe("DakeraSessionState.retainTranscript", () => {
 		await state.retainTranscript(messages);
 
 		const memoryCalls = requests.filter(r => !r.url.endsWith("/v1/sessions/start"));
-		expect(memoryCalls.map(request => request.method)).toEqual(["POST", "POST"]);
+		// Recovery GET per session id: once before each session's first store.
+		expect(memoryCalls.map(request => request.method)).toEqual(["GET", "POST", "GET", "POST"]);
 	});
 
 	// Two publishes in flight would each read an unset transcript id and fork a
 	// second permanent transcript memory, so the queue must hold one back.
 	it("keeps overlapping full-session retains from forking the transcript memory", async () => {
-		serve(request => (request.method === "PUT" ? { memory: { id: "t1" } } : { stored: [{ id: "t1" }] }));
+		serve(request =>
+			request.method === "PUT"
+				? { memory: { id: "t1" } }
+				: request.method === "GET"
+					? { memories: [] }
+					: { stored: [{ id: "t1" }] },
+		);
 		const state = stateFor();
 
 		await Promise.all([state.retainTranscript(messages), state.retainTranscript(messages)]);
 
 		const memoryCalls = requests.filter(r => !r.url.endsWith("/v1/sessions/start"));
-		expect(memoryCalls.map(request => request.method)).toEqual(["POST", "PUT"]);
+		// Queued publishes share one recovery GET: the second publish sees the
+		// id the first stored and updates in place.
+		expect(memoryCalls.map(request => request.method)).toEqual(["GET", "POST", "PUT"]);
 	});
 
 	// One failed write must not wedge the queue: the next retain still has to
 	// reach the server, or a dropped connection would end retention for good.
-	// The client retries each request 3× before surfacing the failure, so the
-	// first transcript exhausts 3 attempts and the second goes through.
+	// Non-idempotent POSTs are never retried by the client (a lost response
+	// could have committed the rows), so a failed transcript write surfaces to
+	// the state layer immediately — and the *next* retain re-stores cleanly.
 	it("runs the next transcript retain after a failed one", async () => {
-		let attempts = 0;
+		let stores = 0;
 		serve(request => {
 			if (request.url.endsWith("/v1/sessions/start")) return {};
-			attempts++;
-			if (attempts <= 3) throw new Error("offline");
+			if (request.method === "GET") return { memories: [] };
+			stores++;
+			if (stores === 1) return { status: 503, body: {} };
 			return { stored: [{ id: "t1" }] };
 		});
 		const state = stateFor({ "dakera.retry.maxRetries": 3 });
 
-		await expect(state.retainTranscript(messages)).rejects.toThrow("offline");
+		await expect(state.retainTranscript(messages)).rejects.toThrow("failed: ");
 		await state.retainTranscript(messages);
 
-		expect(requests.filter(r => r.method === "POST" && !r.url.endsWith("/v1/sessions/start"))).toHaveLength(4);
+		expect(requests.filter(r => r.method === "POST" && !r.url.endsWith("/v1/sessions/start"))).toHaveLength(2);
 	});
 
 	// `last-turn` is the cheap mode: everything before the window must stay local.
@@ -246,6 +277,51 @@ describe("DakeraSessionState.retainTranscript", () => {
 		expect(retained[0]).toContain("the question");
 		expect(retained[0]).toContain("the completed answer");
 		expect(state.lastRetainedTurn).toBe(1);
+	});
+
+	// Regression: a resumed session starts with a fresh state and no in-process
+	// transcript id — the first full-session retain must UPDATE the row the
+	// previous process maintained, not POST a second one.
+	it("recovers the previous process transcript memory on resume", async () => {
+		serve(request =>
+			request.method === "PUT"
+				? { memory: { id: "old-row" } }
+				: request.method === "GET"
+					? {
+							memories: [
+								{
+									id: "old-row",
+									content: "earlier process transcript",
+									memory_type: "episodic",
+									session_id: "sess-1",
+									metadata: { "omp-transcript": true },
+									updated_at: Date.now() - 1000,
+								},
+							],
+						}
+					: { stored: [{ id: "new-row" }] },
+		);
+		const state = stateFor();
+
+		await state.retainTranscript(messages);
+
+		const updateCalls = requests.filter(r => r.method === "PUT");
+		expect(updateCalls).toHaveLength(1);
+		expect(updateCalls[0]?.url).toBe("http://dakera.local/v1/memory/update/old-row?agent_id=omp");
+	});
+
+	// And the fresh-session case: no marker rows on the server → the retain
+	// stores a new row (and stamps it with the recovery marker).
+	it("stores a fresh transcript row with the recovery marker when nothing to recover", async () => {
+		serve(request => (request.method === "GET" ? { memories: [] } : { stored: [{ id: "fresh-row" }] }));
+		const state = stateFor();
+
+		await state.retainTranscript(messages);
+
+		const storeRequestsList = requests.filter(r => r.method === "POST" && !r.url.endsWith("/v1/sessions/start"));
+		expect(storeRequestsList).toHaveLength(1);
+		const memory = storedMemories(storeRequestsList[0])[0] as Record<string, unknown> | undefined;
+		expect((memory?.metadata as Record<string, unknown> | undefined)?.["omp-transcript"]).toBe(true);
 	});
 });
 

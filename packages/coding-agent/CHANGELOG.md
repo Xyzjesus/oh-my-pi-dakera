@@ -5,6 +5,7 @@
 ### Added
 
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
+- Added `memory.backend: dakera` for self-hosted [Dakera](https://dakera.ai) memory: automatic recall on the first turn and transcript retention on agent end, working `recall`, `retain`, and client-synthesized `reflect`, per-repository or global `agent_id` scoping (pinnable per repository with `dakera.agentId` in `.omp/config.yml`), and `DAKERA_*` overrides for every `dakera.*` setting but `agentIdPrefix`.
 - Enabled `org-scoped-identity` and `oauth-token-env` configuration parsing for authentication providers
 - Adopted namespaced `authStorage` API for CLI and session management
 - Added usage reporting for failed native judgments, including error stop reason and message
@@ -154,7 +155,6 @@
 
 ### Added
 
-- Added `memory.backend: dakera` for self-hosted [Dakera](https://dakera.ai) memory: automatic recall on the first turn and transcript retention on agent end, working `recall`, `retain`, and client-synthesized `reflect`, per-repository or global `agent_id` scoping (pinnable per repository with `dakera.agentId` in `.omp/config.yml`), and `DAKERA_*` overrides for every `dakera.*` setting but `agentIdPrefix`.
 - Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
 - Customize the system prompt with Handlebars using live settings and tool data via `SYSTEM_TEMPLATE.md`, `--system-prompt-template`, or the SDK ([#12194](https://github.com/can1357/oh-my-pi/pull/12194) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 

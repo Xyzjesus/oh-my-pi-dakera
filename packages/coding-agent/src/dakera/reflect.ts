@@ -70,6 +70,32 @@ export function formatRecallHits(hits: DakeraRecallHit[]): string {
 		.join("\n\n");
 }
 
+/**
+ * Upper bound on the characters of memory content fed to the reflect model.
+ * Uncapped, `topK=8` hits of a 99k-char transcript ceiling can approach
+ * ~800k characters and overflow the resolved model's context window. The
+ * budget is on the rendered memories block; the newest-ranked overflow rows
+ * are dropped entirely rather than cut mid-fact.
+ */
+const REFLECT_INPUT_CHAR_BUDGET = 60_000;
+
+/**
+ * Truncate the ranked hit list to the character budget: keep the best-ranked
+ * hits whole, drop what does not fit (the caller renders oldest-first inside
+ * {@link formatRecallHits}, so dropped rows are the *newest-ranked* overflow,
+ * which the model would otherwise weight last anyway).
+ */
+export function budgetRecallHits(hits: DakeraRecallHit[]): DakeraRecallHit[] {
+	let total = 0;
+	const kept: DakeraRecallHit[] = [];
+	for (const hit of hits) {
+		if (kept.length > 0 && total + hit.memory.content.length > REFLECT_INPUT_CHAR_BUDGET) break;
+		total += hit.memory.content.length;
+		kept.push(hit);
+	}
+	return kept;
+}
+
 export interface DakeraReflectOptions {
 	config: DakeraConfig;
 	/** Ranked hits from {@link DakeraSessionState.recallHits}; empty means nothing to synthesize. */
@@ -98,7 +124,7 @@ export async function runDakeraReflect(options: DakeraReflectOptions): Promise<s
 	const input = prompt.render(reflectInputTemplate, {
 		question: query,
 		...(context?.trim() ? { context: context.trim() } : {}),
-		memories: formatRecallHits(hits),
+		memories: formatRecallHits(budgetRecallHits(hits)),
 		memoryCount: hits.length,
 	});
 

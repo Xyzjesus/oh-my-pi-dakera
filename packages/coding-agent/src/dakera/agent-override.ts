@@ -25,11 +25,11 @@ import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 
 /** Read `dakera.agentId` from `<dir>/.omp/config.yml`, or `undefined`. */
-function readAgentIdOverride(dir: string): string | undefined {
+async function readAgentIdOverride(dir: string): Promise<string | undefined> {
 	const configPath = path.join(dir, ".omp", "config.yml");
 	let content: string;
 	try {
-		content = fs.readFileSync(configPath, "utf8");
+		content = await Bun.file(configPath).text();
 	} catch {
 		return undefined; // absent or unreadable: keep walking
 	}
@@ -58,24 +58,24 @@ function readAgentIdOverride(dir: string): string | undefined {
  * main checkout (`primaryRoot()`, same logical repo) is therefore consulted
  * as the last candidate: same repo, same agent.
  */
-export function resolveDakeraAgentIdOverride(directory: string): string | undefined {
+export async function resolveDakeraAgentIdOverride(directory: string): Promise<string | undefined> {
 	if (!directory || !path.isAbsolute(directory)) return undefined;
 	const repo = vcs.repo(directory);
 	if (!repo) return undefined;
 	let root: string;
 	try {
-		root = fs.realpathSync(repo.root());
+		root = await fs.promises.realpath(repo.root());
 	} catch {
 		return undefined;
 	}
 	let current: string;
 	try {
-		current = fs.realpathSync(directory);
+		current = await fs.promises.realpath(directory);
 	} catch {
 		current = path.resolve(directory);
 	}
 	while (true) {
-		const override = readAgentIdOverride(current);
+		const override = await readAgentIdOverride(current);
 		if (override) return override;
 		if (current === root) break;
 		const parent = path.dirname(current);
@@ -83,8 +83,8 @@ export function resolveDakeraAgentIdOverride(directory: string): string | undefi
 		current = parent;
 	}
 	try {
-		const primary = fs.realpathSync(repo.primaryRoot());
-		return primary === root ? undefined : readAgentIdOverride(primary);
+		const primary = await fs.promises.realpath(repo.primaryRoot());
+		return primary === root ? undefined : await readAgentIdOverride(primary);
 	} catch {
 		return undefined;
 	}

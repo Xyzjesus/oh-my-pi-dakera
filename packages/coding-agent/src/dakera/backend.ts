@@ -44,6 +44,8 @@ import { DakeraSessionState, getDakeraSessionState, setDakeraSessionState } from
  * rather than a total.
  */
 const MEMORY_LIST_LIMIT = 1000;
+/** Upper bound for clear()'s drain loop (each pass forgets up to MEMORY_LIST_LIMIT rows). */
+const CLEAR_MAX_PASSES = 20;
 
 const NOT_INITIALISED = "Dakera backend is not initialised for this session.";
 
@@ -162,14 +164,44 @@ export const dakeraBackend: MemoryBackend = {
 
 		// Dakera holds the only copy, so this really is a wipe — unlike Hindsight,
 		// where the server-side bank outlives any local cache we can clear.
-		const memories = await target.client.listMemories(target.agentId, { limit: MEMORY_LIST_LIMIT });
-		const ids = collectMemoryIds(memories);
-		if (ids.length === 0) {
-			logger.warn(`Dakera: agent ${target.agentId} had no memories to clear.`);
-			return;
+		// listMemories has no offset/cursor (verified against the official SDK),
+		// so pagination is drain-style: forget the page, list again, stop when a
+		// page comes back empty or stops shrinking (rows the API cannot address).
+		let forgotten = 0;
+		let lastPage = Number.POSITIVE_INFINITY;
+		for (let pass = 0; pass < CLEAR_MAX_PASSES; pass++) {
+			const memories = await target.client.listMemories(target.agentId, { limit: MEMORY_LIST_LIMIT });
+			if (memories.length === 0) {
+				if (forgotten === 0) {
+					logger.warn(`Dakera: agent ${target.agentId} had no memories to clear.`);
+				}
+				getDakeraSessionState(session)?.resetConversationTracking();
+				return;
+			}
+			const ids = collectMemoryIds(memories);
+			if (ids.length === 0 || ids.length >= lastPage) {
+				// The server returned rows without ids, or forgot rows keep coming
+				// back — wiping further would loop forever. Report and stop.
+				logger.warn(
+					`Dakera: agent ${target.agentId} clear stopped after ${listCount(forgotten)} ` +
+						`forgotten; ${memories.length} rows remain unaddressable.`,
+				);
+				getDakeraSessionState(session)?.resetConversationTracking();
+				return;
+			}
+			await target.client.forget(target.agentId, ids);
+			forgotten += ids.length;
+			lastPage = memories.length;
 		}
-		await target.client.forget(target.agentId, ids);
-		logger.warn(`Dakera: forgot ${listCount(ids.length)} memories of agent ${target.agentId}.`);
+		// Hit the pass cap (e.g. a pathological server that re-grows rows between
+		// passes). One final listing decides whether the wipe actually completed.
+		const remaining = await target.client.listMemories(target.agentId, { limit: MEMORY_LIST_LIMIT });
+		if (remaining.length > 0) {
+			logger.warn(
+				`Dakera: agent ${target.agentId} clear left ${remaining.length} memories ` +
+					`after ${listCount(forgotten)} forgotten.`,
+			);
+		}
 
 		// The session keeps its backend; only the cursors into wiped content go.
 		getDakeraSessionState(session)?.resetConversationTracking();

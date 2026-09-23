@@ -1,4 +1,5 @@
 import type { Settings } from "../config/settings";
+import { dakeraBackend } from "../dakera/backend";
 import { localBackend } from "./local-backend";
 import { offBackend } from "./off-backend";
 import type { MemoryBackend } from "./types";
@@ -23,7 +24,7 @@ export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBa
 	if (id === "hindsight") return (await import("../hindsight/backend")).hindsightBackend;
 	if (id === "mnemopi") return (await import("../mnemopi/backend")).mnemopiBackend;
 	if (id === "sharpshooter") return (await import("../sharpshooter/backend")).sharpshooterBackend;
-	if (id === "dakera") return (await import("../dakera/backend")).dakeraBackend;
+	if (id === "dakera") return dakeraBackend;
 	if (id === "local") return localBackend;
 	return offBackend;
 }

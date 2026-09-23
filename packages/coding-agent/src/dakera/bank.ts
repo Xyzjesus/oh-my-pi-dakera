@@ -50,7 +50,7 @@ function baseAgentId(config: DakeraConfig): string {
  * worktree that opts in converges on one agent id.
  */
 export async function computeAgentScope(config: DakeraConfig, directory: string): Promise<AgentScope> {
-	const override = resolveDakeraAgentIdOverride(directory);
+	const override = await resolveDakeraAgentIdOverride(directory);
 	if (override) return { agentId: override };
 	const base = baseAgentId(config);
 	switch (config.scoping) {

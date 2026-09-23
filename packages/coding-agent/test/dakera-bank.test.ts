@@ -141,7 +141,7 @@ describe("dakera.agentId override (.omp/config.yml walk-up)", () => {
 		);
 	});
 
-	it("resolveDakeraAgentIdOverride returns undefined outside any repo", () => {
-		expect(resolveDakeraAgentIdOverride(path.join(path.resolve(os.tmpdir()), "nowhere"))).toBeUndefined();
+	it("resolveDakeraAgentIdOverride returns undefined outside any repo", async () => {
+		expect(await resolveDakeraAgentIdOverride(path.join(path.resolve(os.tmpdir()), "nowhere"))).toBeUndefined();
 	});
 });

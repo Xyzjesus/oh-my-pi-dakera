@@ -181,6 +181,10 @@ describe("AgentSession concurrent disposal", () => {
 			await dakeraGate.promise;
 			order.push("dakera:end");
 		});
+		vi.spyOn(dakera, "buildClosingSummary").mockReturnValue("final summary");
+		vi.spyOn(dakera, "endSessionWithSummary").mockImplementation(async () => {
+			order.push("dakera:session-end");
+		});
 		vi.spyOn(dakera, "dispose").mockImplementation(() => {
 			order.push("dakera:dispose");
 		});
@@ -219,6 +223,8 @@ describe("AgentSession concurrent disposal", () => {
 		expect(closeAt).toBeGreaterThan(order.indexOf("mnemopi:end"));
 		expect(closeAt).toBeGreaterThan(order.indexOf("dakera:end"));
 		expect(order).toContain("dakera:dispose");
+		// The session row closes only after the pending-write drain settled.
+		expect(order.indexOf("dakera:session-end")).toBeGreaterThan(order.indexOf("dakera:end"));
 	});
 
 	it("bounds post-prompt work that ignores abort", async () => {

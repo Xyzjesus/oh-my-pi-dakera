@@ -28,6 +28,8 @@ const DEFAULT_RETAIN_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_BASE_DELAY_MS = 100;
 const DEFAULT_MAX_DELAY_MS = 10_000;
+/** Ceiling for a server-advertised Retry-After — a broken header must not park recall for hours. */
+const MAX_RETRY_AFTER_SECONDS = 60;
 
 export type DakeraMemoryType = "episodic" | "semantic" | "procedural" | "working";
 
@@ -268,7 +270,9 @@ export class DakeraApi {
 			undefined,
 			{ signal: options?.signal },
 		);
-		return Array.isArray(response) ? (response.filter(isRecord) as DakeraMemory[]) : [];
+		// The engine answers a bare array; accept a `{memories: [...]}` wrapper too.
+		const list = Array.isArray(response) ? response : isRecord(response) ? response.memories : undefined;
+		return Array.isArray(list) ? (list.filter(isRecord) as DakeraMemory[]) : [];
 	}
 
 	/**
@@ -347,6 +351,10 @@ export class DakeraApi {
 					? `${operation} request timed out after ${Math.round(timeoutMs / 1000)}s`
 					: `${operation} request failed: ${err instanceof Error ? err.message : String(err)}`;
 				lastError = new DakeraError(message, undefined, err);
+				// The request may or may not have been committed — retrying a
+				// non-idempotent POST (store/storeBatch/sessionStart) here could
+				// duplicate memories or session rows, so surface immediately.
+				if (method === "POST") throw lastError;
 				continue;
 			}
 
@@ -364,9 +372,14 @@ export class DakeraApi {
 					text;
 				// 4xx (except 429) are caller mistakes — never retried.
 				if (response.status === 429) {
-					const header = Number(response.headers.get("Retry-After"));
-					const retryAfter = Number.isFinite(header) && header > 0 ? header : undefined;
-					lastError = new DakeraRateLimitError(`${operation} rate limited`, retryAfter, details);
+					// The server refused without committing, so a retry is safe
+					// even for POST. Parse both header forms (delay-seconds and
+					// HTTP-date) and cap it in the sleep below.
+					lastError = new DakeraRateLimitError(
+						`${operation} rate limited`,
+						parseRetryAfter(response.headers.get("Retry-After")),
+						details,
+					);
 				} else if (response.status >= 400 && response.status < 500) {
 					lastError = new DakeraError(
 						`${operation} failed: ${typeof details === "string" ? details : JSON.stringify(details)}`,
@@ -382,10 +395,16 @@ export class DakeraApi {
 					);
 				}
 				if (lastError instanceof DakeraRateLimitError) {
-					// Respect Retry-After when the server advertises one.
-					const seconds = lastError.retryAfterSeconds;
-					if (seconds) await Bun.sleep(seconds * 1000);
+					// Respect Retry-After when the server advertises one — inside
+					// the cap and observable by the caller's AbortSignal, so a
+					// misconfigured server cannot park recall past Esc.
+					const seconds = Math.min(lastError.retryAfterSeconds ?? 0, MAX_RETRY_AFTER_SECONDS);
+					if (seconds > 0) await abortableSleep(seconds * 1000, opts?.signal);
 				} else if (lastError instanceof DakeraError && lastError.statusCode && lastError.statusCode < 500) {
+					throw lastError;
+				} else if (method === "POST" && response.status >= 500) {
+					// The handler may have committed before failing — same
+					// duplication hazard as the network-error branch above.
 					throw lastError;
 				}
 				continue;
@@ -445,7 +464,8 @@ function unwrapMemoryList(response: unknown): DakeraMemory[] {
 /**
  * Unwrap `{memories: [{memory: {...}, score}]}`. A flat array of memory objects
  * (what the batch surface returns) is wrapped with no score so both shapes
- * reach one consumer.
+ * reach one consumer. Rows without a usable `content` string are dropped —
+ * rendering calls `.replace()` on it unconditionally.
  */
 function unwrapRecallHits(response: unknown): DakeraRecallHit[] {
 	const list = Array.isArray(response) ? response : isRecord(response) ? response.memories : undefined;
@@ -455,6 +475,10 @@ function unwrapRecallHits(response: unknown): DakeraRecallHit[] {
 	for (const entry of list) {
 		if (!isRecord(entry)) continue;
 		if (isRecord(entry.memory)) {
+			// Skip rows whose memory has no usable content string: a malformed
+			// or older-server payload would crash rendering (`.replace()` on
+			// undefined) in both auto-recall and the `recall` tool.
+			if (typeof (entry.memory as { content?: unknown }).content !== "string") continue;
 			hits.push(entry as unknown as DakeraRecallHit);
 			continue;
 		}
@@ -514,6 +538,39 @@ function safeJsonParse(text: string): unknown {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Parse both Retry-After forms the spec allows: delay-seconds and HTTP-date.
+ * Returns whole seconds, or undefined when absent/invalid/negative.
+ */
+export function parseRetryAfter(header: string | null): number | undefined {
+	if (!header) return undefined;
+	const trimmed = header.trim();
+	if (/^\d+$/.test(trimmed)) {
+		const seconds = Number(trimmed);
+		return seconds > 0 ? seconds : undefined;
+	}
+	const at = Date.parse(trimmed);
+	if (Number.isNaN(at)) return undefined;
+	const seconds = Math.ceil((at - Date.now()) / 1000);
+	return seconds > 0 ? seconds : undefined;
+}
+
+/** Sleep that resolves early when the caller's signal aborts (never rejects). */
+async function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) return;
+	await new Promise<void>(resolve => {
+		const timer = setTimeout(resolve, ms);
+		signal?.addEventListener(
+			"abort",
+			() => {
+				clearTimeout(timer);
+				resolve();
+			},
+			{ once: true },
+		);
+	});
 }
 
 export function createDakeraClient(config: DakeraConfig & { apiUrl: string }): DakeraApi {
