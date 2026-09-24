@@ -191,7 +191,7 @@ export class DakeraApi {
 			"storeBatch",
 			{
 				agent_id: agentId,
-				memories: inputs.map(input => buildStoreBody(agentId, input).memory),
+				memories: inputs.map(input => buildStoreBody(agentId, input)),
 			},
 			{ signal: options?.signal, timeoutMs: this.#retainTimeoutMs },
 		);
@@ -272,7 +272,9 @@ export class DakeraApi {
 		);
 		// The engine answers a bare array; accept a `{memories: [...]}` wrapper too.
 		const list = Array.isArray(response) ? response : isRecord(response) ? response.memories : undefined;
-		return Array.isArray(list) ? (list.filter(isRecord) as DakeraMemory[]) : [];
+		return Array.isArray(list)
+			? list.filter(isRecord).map(item => normalizeMemoryContent(item as unknown as DakeraMemory))
+			: [];
 	}
 
 	/**
@@ -423,27 +425,65 @@ export class DakeraApi {
 	}
 }
 
-function buildStoreBody(agentId: string, input: DakeraStoreInput): { memory: Record<string, unknown> } {
-	return {
-		memory: pruneUndefined({
-			agent_id: agentId,
-			content: input.content,
-			memory_type: input.memoryType,
-			importance: input.importance,
-			tags: input.tags,
-			metadata: input.metadata,
-			session_id: input.sessionId,
-		}),
-	};
+/**
+ * The wire record for one memory. `POST /v1/memory/store` takes this flat,
+ * and `POST /v1/memories/store/batch` takes it as each item of `memories` —
+ * the engine never nests it under a `memory` key on the request side (only
+ * the single-store *response* is `{memory, embedding_time_ms}`).
+ */
+function buildStoreBody(agentId: string, input: DakeraStoreInput): Record<string, unknown> {
+	return pruneUndefined({
+		agent_id: agentId,
+		content: input.content,
+		memory_type: input.memoryType,
+		importance: input.importance,
+		tags: input.tags,
+		metadata: input.metadata,
+		session_id: input.sessionId,
+	});
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+/** Engine marker for a server-compressed (curator/consolidation) memory body:
+ * `z64:` + base64 of a zstd frame. Raw payloads must never reach the model. */
+const Z64_PREFIX = "z64:";
+
+/** Decode a `z64:` content string to its stored plaintext. Returns the input
+ * unchanged when it is not z64-prefixed or cannot be decoded, so an unrelated
+ * value and a malformed frame degrade to the pre-fix passthrough instead of
+ * throwing or blanking a memory. */
+export function decodeDakeraContent(content: string): string {
+	// The curator can compress an already-compressed body (observed: consolidated
+	// transcripts wrapped twice), so peel layers until plaintext; the cap bounds
+	// a pathological payload that re-decodes to another frame.
+	let current = content;
+	for (let layer = 0; layer < 8 && current.startsWith(Z64_PREFIX); layer++) {
+		try {
+			const bytes = Buffer.from(current.slice(Z64_PREFIX.length), "base64");
+			if (bytes.length === 0) return current;
+			current = Bun.zstdDecompressSync(bytes).toString("utf8");
+		} catch {
+			return current;
+		}
+	}
+	return current;
+}
+
+/** Replace a compressed `content` with its decoded plaintext, in place. */
+function normalizeMemoryContent(memory: DakeraMemory): DakeraMemory {
+	if (typeof memory.content === "string" && memory.content.startsWith(Z64_PREFIX)) {
+		memory.content = decodeDakeraContent(memory.content);
+	}
+	return memory;
+}
 
 function unwrapMemory(response: unknown): DakeraMemory {
-	if (isRecord(response) && isRecord(response.memory)) return response.memory as unknown as DakeraMemory;
-	if (isRecord(response) && typeof response.content === "string") return response as unknown as DakeraMemory;
+	if (isRecord(response) && isRecord(response.memory))
+		return normalizeMemoryContent(response.memory as unknown as DakeraMemory);
+	if (isRecord(response) && typeof response.content === "string")
+		return normalizeMemoryContent(response as unknown as DakeraMemory);
 	return { content: "" };
 }
 
@@ -458,7 +498,7 @@ function unwrapMemoryList(response: unknown): DakeraMemory[] {
 			? (response.stored ?? response.memories ?? response.memory)
 			: undefined;
 	if (!Array.isArray(list)) return [];
-	return list.filter(isRecord).map(item => item as unknown as DakeraMemory);
+	return list.filter(isRecord).map(item => normalizeMemoryContent(item as unknown as DakeraMemory));
 }
 
 /**
@@ -479,10 +519,14 @@ function unwrapRecallHits(response: unknown): DakeraRecallHit[] {
 			// or older-server payload would crash rendering (`.replace()` on
 			// undefined) in both auto-recall and the `recall` tool.
 			if (typeof (entry.memory as { content?: unknown }).content !== "string") continue;
-			hits.push(entry as unknown as DakeraRecallHit);
+			hits.push({
+				...entry,
+				memory: normalizeMemoryContent(entry.memory as unknown as DakeraMemory),
+			} as DakeraRecallHit);
 			continue;
 		}
-		if (typeof entry.content === "string") hits.push({ memory: entry as unknown as DakeraMemory });
+		if (typeof entry.content === "string")
+			hits.push({ memory: normalizeMemoryContent(entry as unknown as DakeraMemory) });
 	}
 	return hits;
 }

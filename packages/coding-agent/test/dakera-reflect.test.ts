@@ -44,6 +44,28 @@ describe("resolveDakeraModel", () => {
 		expect((await resolveDakeraModel(settings, registryFor([pinned, small])))?.id).toBe("pinned");
 	});
 
+	// `runDakeraReflect` passes `config.reflectModel`, which is
+	// DAKERA_REFLECT_MODEL when set — so the env override has to outrank a
+	// persisted setting, otherwise an operator pinning reflect by env is ignored.
+	it("honors an explicit selector over the persisted setting", async () => {
+		const fromEnv = createMockModel({ provider: "mock", id: "from-env" });
+		const fromSettings = createMockModel({ provider: "mock", id: "from-settings" });
+		const settings = Settings.isolated({ "dakera.reflectModel": "mock/from-settings" });
+
+		expect((await resolveDakeraModel(settings, registryFor([fromEnv, fromSettings]), "mock/from-env"))?.id).toBe(
+			"from-env",
+		);
+	});
+
+	// A selector naming a model that is not in the registry must not make reflect
+	// error out — it falls through to the same role ladder as no selector at all.
+	it("falls back to the role ladder when an explicit selector does not resolve", async () => {
+		const small = createMockModel({ provider: "mock", id: "small" });
+		const settings = Settings.isolated({ modelRoles: { smol: "mock/small" } });
+
+		expect((await resolveDakeraModel(settings, registryFor([small]), "mock/missing"))?.id).toBe("small");
+	});
+
 	// Without any resolvable model reflect must report the missing model rather
 	// than answer from an arbitrary one.
 	it("resolves no model when no role and no selector is configured", async () => {
@@ -80,17 +102,38 @@ describe("formatRecallHits", () => {
 });
 describe("budgetRecallHits", () => {
 	const bigRow = (id: string, size: number) => hit(id, "x".repeat(size), 1_800_000_000, "episodic");
-
 	// Uncapped, topK=8 hits of a 99k-char transcript ceiling could approach
 	// ~800k characters and overflow the reflect model's context window.
-	it("keeps best-ranked hits whole and drops the overflow", () => {
+	it("keeps best-ranked hits whole and clamps the row that crosses the budget", () => {
 		const kept = budgetRecallHits([bigRow("a", 30_000), bigRow("b", 20_000), bigRow("c", 20_000)]);
-		expect(kept.map(row => row.memory.id)).toEqual(["a", "b"]);
+
+		expect(kept.map(row => row.memory.id)).toEqual(["a", "b", "c"]);
+		expect(kept[0].memory.content).toHaveLength(30_000);
+		expect(kept[1].memory.content).toHaveLength(20_000);
+		// c is cut to the remaining room, ellipsis included, so the whole block is
+		// exactly the budget — no overflow reaches the model.
+		expect(kept[2].memory.content).toHaveLength(10_000);
+		expect(kept[2].memory.content.endsWith("…")).toBe(true);
+		expect(kept.reduce((sum, row) => sum + row.memory.content.length, 0)).toBe(60_000);
 	});
 
-	it("keeps a single hit even when it exceeds the budget", () => {
-		const kept = budgetRecallHits([bigRow("huge", 120_000)]);
-		expect(kept.map(row => row.memory.id)).toEqual(["huge"]);
+	// A transcript memory can be 99k chars on its own. Passing it through whole
+	// overflows the context window the budget exists to protect, and dropping it
+	// would report "nothing to reflect on" while holding evidence.
+	it("clamps a single oversized hit instead of passing it through", () => {
+		const [kept] = budgetRecallHits([bigRow("huge", 120_000)]);
+
+		expect(kept.memory.id).toBe("huge");
+		expect(kept.memory.content).toHaveLength(60_000);
+	});
+
+	// The budget must not shorten the session's stored recall results, which the
+	// next turn reuses: clamping happens on a copy.
+	it("does not mutate the hits it budgets", () => {
+		const huge = bigRow("huge", 120_000);
+		budgetRecallHits([huge]);
+
+		expect(huge.memory.content).toHaveLength(120_000);
 	});
 
 	it("passes an empty list through", () => {

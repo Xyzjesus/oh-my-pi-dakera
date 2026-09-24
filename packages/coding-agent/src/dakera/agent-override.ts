@@ -51,7 +51,7 @@ async function readAgentIdOverride(dir: string): Promise<string | undefined> {
  *
  * `repo().root()` can return a differently-spelled path than the cwd chain
  * (e.g. `/var` vs `/private/var` on macOS, or symlinked checkouts), so both
- * sides go through `realpathSync` before comparison.
+ * sides go through `fs.promises.realpath` before comparison.
  *
  * A linked worktree stops at its own root, and the repo root's override file
  * — untracked, so not checked out into the worktree — would be missed. The

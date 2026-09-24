@@ -15,7 +15,7 @@
 
 import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt, truncate } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue, resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -34,8 +34,12 @@ const REFLECT_MAX_OUTPUT_TOKENS = 1024;
  * common case — has no smol role, and the local memory pipeline documents the
  * same `smol` → `default` ladder.
  */
-export async function resolveDakeraModel(settings: Settings, modelRegistry: ModelRegistry): Promise<Model | undefined> {
-	const selector = settings.get("dakera.reflectModel");
+export async function resolveDakeraModel(
+	settings: Settings,
+	modelRegistry: ModelRegistry,
+	configuredSelector?: string | null,
+): Promise<Model | undefined> {
+	const selector = configuredSelector ?? settings.get("dakera.reflectModel");
 	if (selector) {
 		const resolved = resolveModelRoleValue(selector, modelRegistry.getAll(), {
 			settings,
@@ -69,29 +73,41 @@ export function formatRecallHits(hits: DakeraRecallHit[]): string {
 		})
 		.join("\n\n");
 }
-
 /**
  * Upper bound on the characters of memory content fed to the reflect model.
  * Uncapped, `topK=8` hits of a 99k-char transcript ceiling can approach
  * ~800k characters and overflow the resolved model's context window. The
- * budget is on the rendered memories block; the newest-ranked overflow rows
- * are dropped entirely rather than cut mid-fact.
+ * budget is on the rendered memories block; rows past it are dropped.
  */
 const REFLECT_INPUT_CHAR_BUDGET = 60_000;
-
 /**
- * Truncate the ranked hit list to the character budget: keep the best-ranked
- * hits whole, drop what does not fit (the caller renders oldest-first inside
- * {@link formatRecallHits}, so dropped rows are the *newest-ranked* overflow,
- * which the model would otherwise weight last anyway).
+ * Cut the ranked hit list down to {@link REFLECT_INPUT_CHAR_BUDGET} characters.
+ *
+ * Best-ranked hits are kept whole and the newest-ranked overflow is dropped (the
+ * caller renders oldest-first inside {@link formatRecallHits}, so what is cut is
+ * what the model would have weighted last anyway).
+ *
+ * The hit that crosses the budget is clamped rather than dropped: dropping it
+ * would report "nothing to reflect on" while holding evidence, and keeping it
+ * whole overflows the context window the budget exists to protect — a single
+ * 99k-char transcript is enough on its own.
  */
 export function budgetRecallHits(hits: DakeraRecallHit[]): DakeraRecallHit[] {
-	let total = 0;
 	const kept: DakeraRecallHit[] = [];
+	let total = 0;
 	for (const hit of hits) {
-		if (kept.length > 0 && total + hit.memory.content.length > REFLECT_INPUT_CHAR_BUDGET) break;
-		total += hit.memory.content.length;
-		kept.push(hit);
+		const room = REFLECT_INPUT_CHAR_BUDGET - total;
+		if (room <= 0) break;
+		const content = hit.memory.content;
+		if (content.length <= room) {
+			total += content.length;
+			kept.push(hit);
+			continue;
+		}
+		// A copy: these hits are the session's stored recall results and clamping
+		// must not shorten what the next turn sees.
+		kept.push({ ...hit, memory: { ...hit.memory, content: truncate(content, room) } });
+		break;
 	}
 	return kept;
 }
@@ -118,7 +134,7 @@ export async function runDakeraReflect(options: DakeraReflectOptions): Promise<s
 	const { config, hits, settings, modelRegistry, sessionId, query, context } = options;
 	if (hits.length === 0) return "No relevant information found to reflect on.";
 
-	const model = await resolveDakeraModel(settings, modelRegistry);
+	const model = await resolveDakeraModel(settings, modelRegistry, config.reflectModel);
 	if (!model) throw new Error("Dakera reflect needs a model: set dakera.reflectModel or a smol/default model role.");
 
 	const input = prompt.render(reflectInputTemplate, {

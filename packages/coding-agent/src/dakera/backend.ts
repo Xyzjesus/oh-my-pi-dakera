@@ -44,8 +44,16 @@ import { DakeraSessionState, getDakeraSessionState, setDakeraSessionState } from
  * rather than a total.
  */
 const MEMORY_LIST_LIMIT = 1000;
-/** Upper bound for clear()'s drain loop (each pass forgets up to MEMORY_LIST_LIMIT rows). */
-const CLEAR_MAX_PASSES = 20;
+/**
+ * Anti-runaway budget for `clear()`: how many rows it will hand to `forget`
+ * before giving up. A store that drains normally never reaches it — an empty
+ * listing ends the loop first, and a listing pinned by undeletable rows still
+ * makes progress on the rows behind them. The budget exists only for a server
+ * that mints fresh ids on every listing, which would otherwise loop forever.
+ */
+const CLEAR_MAX_ROWS = 100_000;
+/** Reason reported when clear() ends on the budget above rather than on a stop condition. */
+const BUDGET_STOPPED = `the ${CLEAR_MAX_ROWS.toLocaleString("en-US")}-row anti-runaway budget was reached`;
 
 const NOT_INITIALISED = "Dakera backend is not initialised for this session.";
 
@@ -161,50 +169,54 @@ export const dakeraBackend: MemoryBackend = {
 	async clear(_agentDir, _cwd, session): Promise<void> {
 		const target = await resolveTarget(session);
 		if (!target) return;
+		const state = session ? getDakeraSessionState(session) : undefined;
+		const { client, agentId } = target;
 
 		// Dakera holds the only copy, so this really is a wipe — unlike Hindsight,
 		// where the server-side bank outlives any local cache we can clear.
 		// listMemories has no offset/cursor (verified against the official SDK),
-		// so pagination is drain-style: forget the page, list again, stop when a
-		// page comes back empty or stops shrinking (rows the API cannot address).
-		let forgotten = 0;
-		let lastPage = Number.POSITIVE_INFINITY;
-		for (let pass = 0; pass < CLEAR_MAX_PASSES; pass++) {
-			const memories = await target.client.listMemories(target.agentId, { limit: MEMORY_LIST_LIMIT });
+		// so the wipe is drain-style: forget a page, list again, stop when the
+		// listing comes back empty. Progress is counted in *newly attempted ids*,
+		// never in page size: a listing that stays at the cap because the server
+		// refills it still holds deletable rows, and stopping on "the page did not
+		// shrink" (the previous check) abandoned a wipe after a single row the API
+		// could not address. Forgetting is server-confirmed by the listing itself —
+		// `deleted_count` includes derived rows, so it is never a tally.
+		const attempted = new Set<string>();
+		let stopped: string | undefined;
+		/** Rows left, when a stop condition already saw the authoritative page. */
+		let remaining: number | undefined;
+		for (;;) {
+			const memories = await client.listMemories(agentId, { limit: MEMORY_LIST_LIMIT });
 			if (memories.length === 0) {
-				if (forgotten === 0) {
-					logger.warn(`Dakera: agent ${target.agentId} had no memories to clear.`);
-				}
-				getDakeraSessionState(session)?.resetConversationTracking();
-				return;
+				remaining = 0;
+				break;
 			}
-			const ids = collectMemoryIds(memories);
-			if (ids.length === 0 || ids.length >= lastPage) {
-				// The server returned rows without ids, or forgot rows keep coming
-				// back — wiping further would loop forever. Report and stop.
-				logger.warn(
-					`Dakera: agent ${target.agentId} clear stopped after ${listCount(forgotten)} ` +
-						`forgotten; ${memories.length} rows remain unaddressable.`,
-				);
-				getDakeraSessionState(session)?.resetConversationTracking();
-				return;
+			const ids = collectMemoryIds(memories).filter(id => !attempted.has(id));
+			if (ids.length === 0) {
+				// Nothing new is addressable: either rows came back after being
+				// forgotten, or the listing carries no ids at all (an older server).
+				// Either way another pass cannot change the answer.
+				stopped = attempted.size === 0 ? "the listing carried no memory ids" : "forgotten rows keep coming back";
+				remaining = memories.length;
+				break;
 			}
-			await target.client.forget(target.agentId, ids);
-			forgotten += ids.length;
-			lastPage = memories.length;
+			if (attempted.size + ids.length > CLEAR_MAX_ROWS) break;
+			for (const id of ids) attempted.add(id);
+			await client.forget(agentId, ids);
 		}
-		// Hit the pass cap (e.g. a pathological server that re-grows rows between
-		// passes). One final listing decides whether the wipe actually completed.
-		const remaining = await target.client.listMemories(target.agentId, { limit: MEMORY_LIST_LIMIT });
-		if (remaining.length > 0) {
+		// A budget stop says nothing about the store: re-list to find out whether
+		// the wipe actually finished.
+		const left = remaining ?? (await client.listMemories(agentId, { limit: MEMORY_LIST_LIMIT })).length;
+		if (left > 0) {
 			logger.warn(
-				`Dakera: agent ${target.agentId} clear left ${remaining.length} memories ` +
-					`after ${listCount(forgotten)} forgotten.`,
+				`Dakera: agent ${agentId} clear stopped with ${listCount(left)} rows left after ` +
+					`${attempted.size} forgotten (${stopped ?? BUDGET_STOPPED}).`,
 			);
+		} else if (attempted.size === 0) {
+			logger.warn(`Dakera: agent ${agentId} had no memories to clear.`);
 		}
-
-		// The session keeps its backend; only the cursors into wiped content go.
-		getDakeraSessionState(session)?.resetConversationTracking();
+		state?.resetConversationTracking();
 	},
 
 	async enqueue(_agentDir, _cwd, session): Promise<void> {

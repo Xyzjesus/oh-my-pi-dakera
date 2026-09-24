@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import {
 	DakeraApi,
 	DakeraError,
+	decodeDakeraContent,
 	formatDakeraTimestamp,
 	recallHitRank,
 	type DakeraRecallHit,
@@ -45,14 +46,19 @@ afterEach(() => {
 });
 
 describe("DakeraApi store wire shape", () => {
-	it("nests a single store under `memory` and sends no `valid_from`", async () => {
+	it("sends a single store as a flat record, not nested under `memory`", async () => {
 		capture({ memory: { id: "m1", content: "hello" } });
 		await client().store("omp", { content: "hello", memoryType: "semantic", importance: 0.5 });
 
 		expect(requests[0]?.method).toBe("POST");
 		expect(requests[0]?.url).toBe("http://dakera.local/v1/memory/store");
+		// The engine rejects `{memory: {...}}` here with
+		// 422 "missing field `content`" — only the *response* is wrapped.
 		expect(requests[0]?.body).toEqual({
-			memory: { agent_id: "omp", content: "hello", memory_type: "semantic", importance: 0.5 },
+			agent_id: "omp",
+			content: "hello",
+			memory_type: "semantic",
+			importance: 0.5,
 		});
 	});
 
@@ -126,6 +132,49 @@ describe("DakeraApi recall", () => {
 	it("returns no hits for a response it cannot read as a list", async () => {
 		capture({ unexpected: true });
 		expect(await client().recall("omp", "query")).toEqual([]);
+	});
+});
+
+describe("DakeraApi z64 compressed content", () => {
+	// The server's curator stores consolidated memories with `content` replaced
+	// by `z64:` + base64(zstd frame), sometimes nested. Rendering injects
+	// `content` verbatim into the model's `<memories>` block, so a leaked frame
+	// is base64 noise the model cannot read.
+	const z64 = (text: string) => "z64:" + Buffer.from(Bun.zstdCompressSync(Buffer.from(text))).toString("base64");
+
+	it("decodes z64 bodies in recall hits, scored and bare shapes", async () => {
+		capture({
+			memories: [
+				{ memory: { id: "a", content: z64("curated semantic memory") }, smart_score: 0.6 },
+				{ id: "b", content: z64("bare row memory") },
+				{ id: "c", content: "already plaintext" },
+			],
+		});
+		const hits = await client().recall("omp", "query");
+		expect(hits.map(hit => hit.memory.content)).toEqual([
+			"curated semantic memory",
+			"bare row memory",
+			"already plaintext",
+		]);
+	});
+
+	it("peels nested z64 layers down to plaintext", async () => {
+		// Observed live: the curator compresses already-compressed transcript rows.
+		capture({ memories: [{ id: "a", content: z64(z64("double wrapped memory")) }] });
+		expect((await client().recall("omp", "query"))[0]?.memory.content).toBe("double wrapped memory");
+	});
+
+	it("decodes z64 bodies in listMemories and update responses", async () => {
+		capture([{ id: "a", content: z64("listed memory") }]);
+		expect((await client().listMemories("omp"))[0]?.content).toBe("listed memory");
+		capture({ memory: { id: "a", content: z64("updated memory") } });
+		expect((await client().update("omp", "a", "ignored")).content).toBe("updated memory");
+	});
+
+	it("leaves plaintext and undecodable z64-looking frames unchanged", () => {
+		expect(decodeDakeraContent("plain")).toBe("plain");
+		expect(decodeDakeraContent("z64: not a real frame")).toBe("z64: not a real frame");
+		expect(decodeDakeraContent("z64:!!not-base64!!")).toBe("z64:!!not-base64!!");
 	});
 });
 
