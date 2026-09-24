@@ -1,6 +1,6 @@
 # Autonomous Memory
 
-Oh My Pi supports six memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
+omp supports six memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
 
 | `memory.backend` | Storage and behavior                                                   | Guide                                                   |
 | ---------------- | ---------------------------------------------------------------------- | ------------------------------------------------------- |
