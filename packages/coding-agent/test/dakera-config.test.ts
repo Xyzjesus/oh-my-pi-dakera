@@ -39,17 +39,21 @@ describe("loadDakeraConfig", () => {
 		expect(isDakeraConfigured(configFor())).toBe(true);
 	});
 
-	it("falls back to the documented mode when a scoping or retainMode value is invalid", () => {
-		const config = configFor({ "dakera.scoping": "per-project-tagged", "dakera.retainMode": "half-session" });
-		expect(config.scoping).toBe("per-project");
-		expect(config.retainMode).toBe("full-session");
+	// `DAKERA_*` values bypass registry validation, so a typo'd mode must fall
+	// back to the persisted setting instead of yielding an unknown scoping,
+	// while a valid env mode still overrides the persisted one.
+	it("ignores an invalid scoping or retainMode from the environment", () => {
+		const persisted = { "dakera.scoping": "global", "dakera.retainMode": "last-turn" };
+		const ignored = configFor(persisted, {
+			DAKERA_SCOPING: "per-project-tagged",
+			DAKERA_RETAIN_MODE: "half-session",
+		});
+		expect(ignored.scoping).toBe("global");
+		expect(ignored.retainMode).toBe("last-turn");
 
-		const overridden = configFor(
-			{ "dakera.scoping": "per-project-tagged", "dakera.retainMode": "half-session" },
-			{ DAKERA_SCOPING: "global", DAKERA_RETAIN_MODE: "last-turn" },
-		);
-		expect(overridden.scoping).toBe("global");
-		expect(overridden.retainMode).toBe("last-turn");
+		const overridden = configFor(persisted, { DAKERA_SCOPING: "per-project", DAKERA_RETAIN_MODE: "full-session" });
+		expect(overridden.scoping).toBe("per-project");
+		expect(overridden.retainMode).toBe("full-session");
 	});
 
 	it("keeps an explicit false for booleans instead of treating it as unset", () => {

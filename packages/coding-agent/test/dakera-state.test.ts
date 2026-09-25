@@ -206,7 +206,7 @@ describe("DakeraSessionState.retainTranscript", () => {
 			if (stores === 1) return { status: 503, body: {} };
 			return { stored: [{ id: "t1" }] };
 		});
-		const state = stateFor({ "dakera.retry.maxRetries": 3 });
+		const state = stateFor();
 
 		await expect(state.retainTranscript(messages)).rejects.toThrow("failed: ");
 		await state.retainTranscript(messages);

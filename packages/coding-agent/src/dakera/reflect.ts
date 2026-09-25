@@ -24,6 +24,7 @@ import reflectSystemTemplate from "../prompts/memories/dakera-reflect-system.md"
 import { withTimeoutSignal } from "../utils/fetch-timeout";
 import { type DakeraRecallHit, formatDakeraTimestamp } from "./client";
 import type { DakeraConfig } from "./config";
+import { cfgDakeraReflectModel } from "./settings";
 
 const REFLECT_MAX_OUTPUT_TOKENS = 1024;
 
@@ -39,7 +40,7 @@ export async function resolveDakeraModel(
 	modelRegistry: ModelRegistry,
 	configuredSelector?: string | null,
 ): Promise<Model | undefined> {
-	const selector = configuredSelector ?? settings.get("dakera.reflectModel");
+	const selector = configuredSelector ?? cfgDakeraReflectModel.get(settings);
 	if (selector) {
 		const resolved = resolveModelRoleValue(selector, modelRegistry.getAll(), {
 			settings,

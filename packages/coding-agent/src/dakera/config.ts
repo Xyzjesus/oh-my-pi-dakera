@@ -3,8 +3,7 @@
  *
  * Source of truth precedence (last wins):
  *   1. Built-in defaults
- *   2. Settings (`dakera.*` schema entries via `Settings.get(...)`)
- *   3. `DAKERA_*` environment variables
+ *   2. Settings (`dakera.*` registry handles in `dakera/settings.ts`)
  *
  * Env wins because operators frequently override per-shell (CI, prod) without
  * touching the persisted settings file. Both `DAKERA_API_TOKEN` (the
@@ -14,8 +13,30 @@
  * server, the MCP surface and omp agree.
  */
 
-import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import {
+	cfgDakeraApiToken,
+	cfgDakeraApiUrl,
+	cfgDakeraAgentId,
+	cfgDakeraAgentIdPrefix,
+	cfgDakeraAutoRecall,
+	cfgDakeraAutoRetain,
+	cfgDakeraDebug,
+	cfgDakeraRecallContextTurns,
+	cfgDakeraRecallMaxQueryChars,
+	cfgDakeraRecallMinImportance,
+	cfgDakeraRecallRerank,
+	cfgDakeraRecallTimeoutMs,
+	cfgDakeraRecallTopK,
+	cfgDakeraReflectModel,
+	cfgDakeraReflectTimeoutMs,
+	cfgDakeraRequestTimeoutMs,
+	cfgDakeraRetainEveryNTurns,
+	cfgDakeraRetainImportance,
+	cfgDakeraRetainMode,
+	cfgDakeraRetainTimeoutMs,
+	cfgDakeraScoping,
+} from "./settings";
 
 export type DakeraScoping = "global" | "per-project";
 
@@ -110,48 +131,30 @@ export function loadDakeraConfig(settings: Settings, env: NodeJS.ProcessEnv = pr
 	const rerankEnv = envBool(env.DAKERA_RECALL_RERANK);
 	const debugEnv = envBool(env.DAKERA_DEBUG);
 
-	const settingsScoping = pickScoping(settings.get("dakera.scoping"));
-	if (settings.get("dakera.scoping") && !settingsScoping) {
-		logger.warn("Dakera: invalid scoping setting, falling back to per-project", {
-			value: settings.get("dakera.scoping"),
-		});
-	}
-	const settingsRetainMode = pickRetainMode(settings.get("dakera.retainMode"));
-	if (settings.get("dakera.retainMode") && !settingsRetainMode) {
-		logger.warn("Dakera: invalid retainMode setting, falling back to full-session", {
-			value: settings.get("dakera.retainMode"),
-		});
-	}
-
+	// Invalid persisted enum values are caught by the registry (`compute` warns and
+	// falls back to the default), so only the raw env value needs validation here.
 	return {
-		apiUrl: apiUrlEnv ?? settings.get("dakera.apiUrl") ?? null,
-		apiToken: apiTokenEnv ?? settings.get("dakera.apiToken") ?? null,
-
-		agentId: agentIdEnv ?? settings.get("dakera.agentId") ?? null,
-		agentIdPrefix: settings.get("dakera.agentIdPrefix") ?? "",
-		scoping: scopingEnv ?? settingsScoping ?? "per-project",
-
-		autoRecall: autoRecallEnv ?? settings.get("dakera.autoRecall"),
-		autoRetain: autoRetainEnv ?? settings.get("dakera.autoRetain"),
-
-		retainMode: retainModeEnv ?? settingsRetainMode ?? "full-session",
-		retainEveryNTurns: envNumber(env.DAKERA_RETAIN_EVERY_N_TURNS) ?? settings.get("dakera.retainEveryNTurns"),
-		retainImportance: envNumber(env.DAKERA_RETAIN_IMPORTANCE) ?? settings.get("dakera.retainImportance"),
-
-		recallTopK: envNumber(env.DAKERA_RECALL_TOP_K) ?? settings.get("dakera.recallTopK"),
-		recallMinImportance: envNumber(env.DAKERA_RECALL_MIN_IMPORTANCE) ?? settings.get("dakera.recallMinImportance"),
-		recallRerank: rerankEnv ?? settings.get("dakera.recallRerank"),
-		recallContextTurns: envNumber(env.DAKERA_RECALL_CONTEXT_TURNS) ?? settings.get("dakera.recallContextTurns"),
-		recallMaxQueryChars: envNumber(env.DAKERA_RECALL_MAX_QUERY_CHARS) ?? settings.get("dakera.recallMaxQueryChars"),
-
-		reflectModel: envString(env.DAKERA_REFLECT_MODEL) ?? settings.get("dakera.reflectModel") ?? null,
-
-		debug: debugEnv ?? settings.get("dakera.debug"),
-
-		requestTimeoutMs: envNumber(env.DAKERA_REQUEST_TIMEOUT_MS) ?? settings.get("dakera.requestTimeoutMs"),
-		recallTimeoutMs: envNumber(env.DAKERA_RECALL_TIMEOUT_MS) ?? settings.get("dakera.recallTimeoutMs"),
-		retainTimeoutMs: envNumber(env.DAKERA_RETAIN_TIMEOUT_MS) ?? settings.get("dakera.retainTimeoutMs"),
-		reflectTimeoutMs: envNumber(env.DAKERA_REFLECT_TIMEOUT_MS) ?? settings.get("dakera.reflectTimeoutMs"),
+		apiUrl: apiUrlEnv ?? cfgDakeraApiUrl.get(settings) ?? null,
+		apiToken: apiTokenEnv ?? cfgDakeraApiToken.get(settings) ?? null,
+		agentId: agentIdEnv ?? cfgDakeraAgentId.get(settings) ?? null,
+		agentIdPrefix: cfgDakeraAgentIdPrefix.get(settings) ?? "",
+		scoping: scopingEnv ?? cfgDakeraScoping.get(settings),
+		autoRecall: autoRecallEnv ?? cfgDakeraAutoRecall.get(settings),
+		autoRetain: autoRetainEnv ?? cfgDakeraAutoRetain.get(settings),
+		retainMode: retainModeEnv ?? cfgDakeraRetainMode.get(settings),
+		retainEveryNTurns: envNumber(env.DAKERA_RETAIN_EVERY_N_TURNS) ?? cfgDakeraRetainEveryNTurns.get(settings),
+		retainImportance: envNumber(env.DAKERA_RETAIN_IMPORTANCE) ?? cfgDakeraRetainImportance.get(settings),
+		recallTopK: envNumber(env.DAKERA_RECALL_TOP_K) ?? cfgDakeraRecallTopK.get(settings),
+		recallMinImportance: envNumber(env.DAKERA_RECALL_MIN_IMPORTANCE) ?? cfgDakeraRecallMinImportance.get(settings),
+		recallRerank: rerankEnv ?? cfgDakeraRecallRerank.get(settings),
+		recallContextTurns: envNumber(env.DAKERA_RECALL_CONTEXT_TURNS) ?? cfgDakeraRecallContextTurns.get(settings),
+		recallMaxQueryChars: envNumber(env.DAKERA_RECALL_MAX_QUERY_CHARS) ?? cfgDakeraRecallMaxQueryChars.get(settings),
+		reflectModel: envString(env.DAKERA_REFLECT_MODEL) ?? cfgDakeraReflectModel.get(settings) ?? null,
+		debug: debugEnv ?? cfgDakeraDebug.get(settings),
+		requestTimeoutMs: envNumber(env.DAKERA_REQUEST_TIMEOUT_MS) ?? cfgDakeraRequestTimeoutMs.get(settings),
+		recallTimeoutMs: envNumber(env.DAKERA_RECALL_TIMEOUT_MS) ?? cfgDakeraRecallTimeoutMs.get(settings),
+		retainTimeoutMs: envNumber(env.DAKERA_RETAIN_TIMEOUT_MS) ?? cfgDakeraRetainTimeoutMs.get(settings),
+		reflectTimeoutMs: envNumber(env.DAKERA_REFLECT_TIMEOUT_MS) ?? cfgDakeraReflectTimeoutMs.get(settings),
 	};
 }
 
