@@ -45,14 +45,17 @@ describe("loadDakeraConfig", () => {
 	it("ignores an invalid scoping or retainMode from the environment", () => {
 		const persisted = { "dakera.scoping": "global", "dakera.retainMode": "last-turn" };
 		const ignored = configFor(persisted, {
-			DAKERA_SCOPING: "per-project-tagged",
+			DAKERA_SCOPING: "per-project-untagged",
 			DAKERA_RETAIN_MODE: "half-session",
 		});
 		expect(ignored.scoping).toBe("global");
 		expect(ignored.retainMode).toBe("last-turn");
 
-		const overridden = configFor(persisted, { DAKERA_SCOPING: "per-project", DAKERA_RETAIN_MODE: "full-session" });
-		expect(overridden.scoping).toBe("per-project");
+		const overridden = configFor(persisted, {
+			DAKERA_SCOPING: "per-project-tagged",
+			DAKERA_RETAIN_MODE: "full-session",
+		});
+		expect(overridden.scoping).toBe("per-project-tagged");
 		expect(overridden.retainMode).toBe("full-session");
 	});
 

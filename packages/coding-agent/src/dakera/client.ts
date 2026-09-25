@@ -86,6 +86,8 @@ export interface DakeraRecallOptions extends DakeraRequestOptions {
 	memoryType?: DakeraMemoryType;
 	since?: string;
 	until?: string;
+	/** ANY-match tag filter: the server keeps memories carrying >=1 of these tags. */
+	tags?: string[];
 }
 
 export interface DakeraTimeouts {
@@ -247,6 +249,8 @@ export class DakeraApi {
 				memory_type: options?.memoryType,
 				since: options?.since,
 				until: options?.until,
+				// ANY-match on zero tags matches nothing; an empty filter must not blank recall.
+				tags: options?.tags?.length ? options.tags : undefined,
 			}),
 			{ signal: options?.signal, timeoutMs: this.#recallTimeoutMs },
 		);

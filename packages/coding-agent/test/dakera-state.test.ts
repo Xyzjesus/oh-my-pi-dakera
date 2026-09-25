@@ -39,7 +39,12 @@ function serve(respond: (request: Captured) => unknown): void {
 
 const stateFor = (
 	overrides: Record<string, unknown> = {},
-	stateOverrides: { sessionId?: string; retainTags?: string[]; entries?: () => SessionEntry[] } = {},
+	stateOverrides: {
+		sessionId?: string;
+		retainTags?: string[];
+		recallTags?: string[];
+		entries?: () => SessionEntry[];
+	} = {},
 ): DakeraSessionState => {
 	const config = loadDakeraConfig(Settings.isolated({ "dakera.apiUrl": "http://dakera.local", ...overrides }));
 	return new DakeraSessionState({
@@ -47,6 +52,7 @@ const stateFor = (
 		client: new DakeraApi({ baseUrl: config.apiUrl ?? "http://dakera.local" }),
 		agentId: "omp",
 		retainTags: stateOverrides.retainTags,
+		recallTags: stateOverrides.recallTags,
 		config,
 		// Auto-retain listeners are not exercised here; the state only stores the session.
 		session: (stateOverrides.entries
@@ -359,6 +365,21 @@ describe("DakeraSessionState.recallFormatted", () => {
 			top_k: 5,
 			min_importance: 0,
 			rerank: false,
+		});
+	});
+
+	// `per-project-tagged` isolation lives here: without the filter reaching the
+	// server, every project sharing the agent id would read every other's memory.
+	it("sends the tag filter on every recall", async () => {
+		serve(() => ({ memories: [] }));
+		await stateFor({}, { recallTags: ["project:alpha", "global:shared"] }).recallFormatted("query");
+		expect(requests[0]?.body).toEqual({
+			agent_id: "omp",
+			query: "query",
+			top_k: 8,
+			min_importance: 0,
+			rerank: true,
+			tags: ["project:alpha", "global:shared"],
 		});
 	});
 });

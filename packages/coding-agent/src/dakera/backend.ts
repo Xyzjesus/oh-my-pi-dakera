@@ -62,6 +62,7 @@ interface DakeraTarget {
 	client: DakeraApi;
 	agentId: string;
 	retainTags?: string[];
+	recallTags?: string[];
 }
 
 /** Resolve what `settings` plus `cwd` point at, or `undefined` when unconfigured. */
@@ -79,7 +80,13 @@ async function resolveDakeraTarget(settings: Settings, cwd: string): Promise<Dak
 async function resolveTarget(session: AgentSession | undefined): Promise<DakeraTarget | undefined> {
 	const state = session ? getDakeraSessionState(session) : undefined;
 	if (state) {
-		return { config: state.config, client: state.client, agentId: state.agentId, retainTags: state.retainTags };
+		return {
+			config: state.config,
+			client: state.client,
+			agentId: state.agentId,
+			retainTags: state.retainTags,
+			recallTags: state.recallTags,
+		};
 	}
 	return session ? await resolveDakeraTarget(session.settings, session.sessionManager.getCwd()) : undefined;
 }
@@ -123,6 +130,7 @@ export const dakeraBackend: MemoryBackend = {
 				client: createDakeraClient(config),
 				agentId: scope.agentId,
 				retainTags: scope.retainTags,
+				recallTags: scope.recallTags,
 				config,
 				session,
 				// A subagent shares the parent's agent id (same cwd, same scheme) but
@@ -288,6 +296,7 @@ export const dakeraBackend: MemoryBackend = {
 				topK: options?.limit ?? target.config.recallTopK,
 				minImportance: target.config.recallMinImportance,
 				rerank: target.config.recallRerank,
+				tags: target.recallTags,
 				signal: options?.signal,
 			});
 			const ranked = [...hits].sort((a, b) => recallHitRank(b) - recallHitRank(a));

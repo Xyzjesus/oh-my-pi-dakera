@@ -10,8 +10,8 @@ import { register } from "../config/registry";
 
 // Dakera (https://dakera.ai) — self-hosted remote memory. There is no bank
 // concept: isolation is the `agent_id`, so the Hindsight bank/scoping knobs
-// collapse into an agent-id scheme (see dakera/bank.ts). Dakera's recall
-// cannot filter by tags, which is why `per-project-tagged` is not offered.
+// collapse into an agent-id scheme (see dakera/bank.ts). Recall accepts a
+// tag filter (`tags`, ANY-match), which is what makes `per-project-tagged` work.
 export const cfgDakeraApiUrl = register({
 	id: "dakera.apiUrl",
 	type: "string",
@@ -57,14 +57,14 @@ export const cfgDakeraAgentIdPrefix = register({ id: "dakera.agentIdPrefix", typ
 export const cfgDakeraScoping = register({
 	id: "dakera.scoping",
 	type: "enum",
-	values: ["global", "per-project"] as const,
+	values: ["global", "per-project", "per-project-tagged"] as const,
 	default: "per-project",
 	ui: {
 		tab: "memory",
 		group: "Dakera",
 		label: "Dakera Scoping",
 		description:
-			"global = one shared agent_id; per-project = isolated agent_id per repository. Tag filtering is not available on recall, so there is no shared-bank-with-tags mode",
+			"global = one shared agent_id; per-project = isolated agent_id per repository; per-project-tagged = shared agent_id with project tags, so the current project plus global-tagged memories merge on recall",
 		options: [
 			{
 				value: "global",
@@ -75,6 +75,12 @@ export const cfgDakeraScoping = register({
 				value: "per-project",
 				label: "Per project",
 				description: "Isolated agent_id per repository — projects cannot see each other's memories",
+			},
+			{
+				value: "per-project-tagged",
+				label: "Per project (tagged)",
+				description:
+					"Shared agent_id; retains are tagged `project:<repo>` and recall filters on it, so this project's memories plus `global:shared` ones surface together",
 			},
 		],
 		condition: "dakeraActive",

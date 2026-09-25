@@ -174,3 +174,32 @@ describe("backend.save (Dakera)", () => {
 		});
 	});
 });
+
+// The mode only isolates if the filter survives the whole chain (`dakera.scoping`
+// -> `computeAgentScope` -> recall body), so it is asserted end to end: on its
+// own the setting is silently inert.
+describe("backend.search tag scoping (Dakera)", () => {
+	const searchContext = (scoping: string) =>
+		({
+			session: {
+				settings: Settings.isolated({
+					"memory.backend": "dakera",
+					"dakera.apiUrl": "http://dakera.local",
+					"dakera.scoping": scoping,
+				}),
+				sessionManager: { getCwd: () => "/work/alpha" },
+			},
+		}) as unknown as Parameters<NonNullable<typeof dakeraBackend.search>>[0];
+
+	it("narrows recall to the project plus the global tier when tagged", async () => {
+		await dakeraBackend.search?.(searchContext("per-project-tagged"), "alpha");
+		expect(recall.mock.calls.at(-1)?.[0]).toBe("omp");
+		expect(recall.mock.calls.at(-1)?.[2]).toMatchObject({ tags: ["project:alpha", "global:shared"] });
+	});
+
+	it("leaves recall unfiltered under per-project isolation", async () => {
+		await dakeraBackend.search?.(searchContext("per-project"), "alpha");
+		expect(recall.mock.calls.at(-1)?.[0]).toBe("omp-alpha");
+		expect(recall.mock.calls.at(-1)?.[2]?.tags).toBeUndefined();
+	});
+});

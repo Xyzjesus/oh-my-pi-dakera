@@ -92,8 +92,10 @@ export interface DakeraSessionStateOptions {
 	sessionId: string;
 	client: DakeraApi;
 	agentId: string;
-	/** Tags attached to every store — set in `global` scoping, where the agent id alone cannot name the project. */
+	/** Tags attached to every store — set in `global`/`per-project-tagged` scoping, where the agent id alone cannot name the project. */
 	retainTags?: string[];
+	/** ANY-match tag filter for every recall — set in `per-project-tagged` scoping; `undefined` leaves recall unfiltered. */
+	recallTags?: string[];
 	config: DakeraConfig;
 	session: AgentSession;
 	/** False for subagent sessions: auto-recall and auto-retain belong to the parent turn loop. */
@@ -111,6 +113,7 @@ export class DakeraSessionState {
 	readonly client: DakeraApi;
 	readonly agentId: string;
 	readonly retainTags?: string[];
+	readonly recallTags?: string[];
 	readonly config: DakeraConfig;
 	readonly session: AgentSession;
 	/** User-turn count at the last successful auto-retain. */
@@ -146,6 +149,7 @@ export class DakeraSessionState {
 		this.client = options.client;
 		this.agentId = options.agentId;
 		this.retainTags = options.retainTags;
+		this.recallTags = options.recallTags;
 		this.config = options.config;
 		this.session = options.session;
 		this.#autonomous = options.autonomous !== false;
@@ -180,6 +184,7 @@ export class DakeraSessionState {
 			topK: this.config.recallTopK,
 			minImportance: this.config.recallMinImportance,
 			rerank: this.config.recallRerank,
+			tags: this.recallTags,
 			signal,
 		});
 		return [...hits].sort((a, b) => recallHitRank(b) - recallHitRank(a));

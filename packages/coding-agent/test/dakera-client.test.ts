@@ -115,6 +115,21 @@ describe("DakeraApi recall", () => {
 		});
 	});
 
+	// `per-project-tagged` scoping only isolates if the filter reaches the server;
+	// an empty tag list must not be sent, as the server would read it as a filter
+	// that can never match.
+	it("forwards the tag filter and leaves it out when unset", async () => {
+		capture({ memories: [] });
+		await client().recall("omp", "query", { tags: ["project:alpha", "global:shared"] });
+		expect(requests[0]?.body).toEqual({
+			agent_id: "omp",
+			query: "query",
+			tags: ["project:alpha", "global:shared"],
+		});
+		await client().recall("omp", "query", { tags: [] });
+		expect(requests[1]?.body).not.toHaveProperty("tags");
+	});
+
 	it("unwraps scored hits and bare memory rows into one shape", async () => {
 		capture({
 			memories: [

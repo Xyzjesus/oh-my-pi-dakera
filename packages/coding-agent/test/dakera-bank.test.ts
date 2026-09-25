@@ -83,6 +83,53 @@ describe("computeAgentScope", () => {
 		});
 	});
 
+	// The shared agent id cannot isolate projects, so isolation moves to tags:
+	// writes carry the project, reads ask for the project plus the global tier.
+	describe("scoping=per-project-tagged", () => {
+		it("keeps one shared agent id across projects", async () => {
+			const config = baseConfig({ scoping: "per-project-tagged" });
+			expect((await computeAgentScope(config, "/work/alpha")).agentId).toBe("omp");
+			expect((await computeAgentScope(config, "/work/beta")).agentId).toBe("omp");
+		});
+
+		it("retains under the project tag and recalls it alongside the global tier", async () => {
+			const scope = await computeAgentScope(baseConfig({ scoping: "per-project-tagged" }), "/work/alpha");
+			expect(scope.retainTags).toEqual(["project:alpha"]);
+			expect(scope.recallTags).toEqual(["project:alpha", "global:shared"]);
+		});
+
+		// ANY-match on two tags is the whole merge: a filtered-out untagged row
+		// must never make it into the project scope, and the two checkouts must
+		// never read each other's tagged memories.
+		it("gives each project its own recall filter", async () => {
+			const config = baseConfig({ scoping: "per-project-tagged" });
+			const alpha = await computeAgentScope(config, "/work/alpha");
+			const beta = await computeAgentScope(config, "/work/beta");
+			expect(beta.recallTags).toEqual(["project:beta", "global:shared"]);
+			expect(alpha.recallTags).not.toContain("project:beta");
+			expect(beta.recallTags).not.toContain("project:alpha");
+		});
+
+		// A leaked filter in the other two modes would silently drop every
+		// untagged memory already stored under those agent ids.
+		it("leaves recall unfiltered in global and per-project modes", async () => {
+			expect((await computeAgentScope(baseConfig({ scoping: "global" }), "/work/alpha")).recallTags).toBeUndefined();
+			expect(
+				(await computeAgentScope(baseConfig({ scoping: "per-project" }), "/work/alpha")).recallTags,
+			).toBeUndefined();
+		});
+
+		// The override names the agent outright, so it also drops tag scoping.
+		it("drops tag scoping under an explicit agent id override", async () => {
+			const dir = makeRepo("dakera:\n  agentId: custom-agent\n");
+			scratchDirs.push(dir);
+			const scope = await computeAgentScope(baseConfig({ scoping: "per-project-tagged" }), dir);
+			expect(scope.agentId).toBe("custom-agent");
+			expect(scope.retainTags).toBeUndefined();
+			expect(scope.recallTags).toBeUndefined();
+		});
+	});
+
 	it("labels an empty working directory as unknown", async () => {
 		expect((await computeAgentScope(baseConfig(), "")).agentId).toBe("omp-unknown");
 	});

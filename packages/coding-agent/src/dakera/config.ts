@@ -38,7 +38,7 @@ import {
 	cfgDakeraScoping,
 } from "./settings";
 
-export type DakeraScoping = "global" | "per-project";
+export type DakeraScoping = "global" | "per-project" | "per-project-tagged";
 
 export interface DakeraConfig {
 	apiUrl: string | null;
@@ -79,7 +79,7 @@ export interface DakeraConfig {
 }
 
 const VALID_RETAIN_MODES: DakeraConfig["retainMode"][] = ["full-session", "last-turn"];
-const VALID_SCOPINGS: DakeraScoping[] = ["global", "per-project"];
+const VALID_SCOPINGS: DakeraScoping[] = ["global", "per-project", "per-project-tagged"];
 
 const DEFAULT_PREAMBLE =
 	"Relevant memories from past conversations (prioritize recent when conflicting). " +
