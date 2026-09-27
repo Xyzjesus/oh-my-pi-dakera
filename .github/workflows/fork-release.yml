@@ -1,0 +1,214 @@
+name: fork-release
+
+# Fork-only release pipeline for the Dakera memory feature branch.
+# This file exists ONLY on build/dakera — never on feat/dakera-memory or main —
+# so the upstream PR diff stays a clean single commit.
+# Manual trigger only: Actions → fork-release → Run workflow (pick the tag).
+
+on:
+   push:
+      tags:
+         - "v*-dakera.*"
+   workflow_dispatch:
+      inputs:
+         tag:
+            description: "Release tag name (defaults to the ref this run started from)"
+            required: false
+            default: ""
+
+permissions:
+   contents: write # create GitHub Release + upload assets
+
+concurrency:
+   group: fork-release-${{ github.ref }}
+   cancel-in-progress: false
+
+jobs:
+   build:
+      name: build ${{ matrix.target_id }}
+      # Mirrors upstream's release_build matrix, minus Apple-signing and bazel
+      # native caches: in the fork, native addons build inline via bun (the
+      # pi-natives package ships prebuilds for the big three; where it does
+      # not, this job is allowed to fail and the release ships without that
+      # platform — fail-fast is off on purpose).
+      runs-on: ${{ matrix.os }}
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - os: macos-15
+                 target_id: darwin-arm64
+                 platform: darwin
+                 binary_path: packages/coding-agent/binaries/omp-darwin-arm64
+               - os: macos-15
+                 target_id: darwin-x64
+                 platform: darwin
+                 binary_path: packages/coding-agent/binaries/omp-darwin-x64
+               - os: ubuntu-24.04
+                 target_id: linux-x64
+                 platform: linux
+                 binary_path: packages/coding-agent/binaries/omp-linux-x64
+               - os: ubuntu-24.04-arm
+                 target_id: linux-arm64
+                 platform: linux
+                 binary_path: packages/coding-agent/binaries/omp-linux-arm64
+               - os: ubuntu-24.04
+                 target_id: win32-x64
+                 platform: win32
+                 binary_path: packages/coding-agent/binaries/omp-windows-x64.exe
+               - os: ubuntu-24.04
+                 target_id: linux-musl-x64
+                 platform: linux
+                 binary_path: packages/coding-agent/binaries/omp-linux-musl-x64
+               - os: ubuntu-24.04-arm
+                 target_id: linux-musl-arm64
+                 platform: linux
+                 binary_path: packages/coding-agent/binaries/omp-linux-musl-arm64
+      steps:
+         - uses: actions/checkout@v4
+           with:
+            # Release assets must trace to the exact tag commit.
+            ref: ${{ inputs.tag || github.ref }}
+
+         - uses: oven-sh/setup-bun@v2
+
+         - name: Restore bun store
+           uses: actions/cache/restore@v4
+           with:
+            path: ~/.bun/install/cache
+            key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+            restore-keys: bun-${{ runner.os }}-
+
+         - run: bun install --frozen-lockfile
+
+         - name: Build native addon (host cargo)
+           if: matrix.target_id != 'darwin-x64' && matrix.target_id != 'win32-x64' && matrix.target_id != 'linux-musl-x64' && matrix.target_id != 'linux-musl-arm64'
+           run: bun --cwd=packages/natives run build
+           env:
+              OMP_NATIVE_CARGO_PROFILE: local
+
+         - name: Build native addon (cross cargo)
+           if: matrix.target_id == 'darwin-x64'
+           run: |
+              set -euo pipefail
+              rustup target add x86_64-apple-darwin
+              # build-bindings pins ISA floors for x64: modern=x86-64-v3,
+              # baseline=x86-64-v2; embed-native requires BOTH variant files.
+              for VARIANT in modern baseline; do
+                CPU=$([ "$VARIANT" = "modern" ] && echo "x86-64-v3" || echo "x86-64-v2")
+                RUSTFLAGS="-C target-cpu=$CPU" cargo build --profile local --target x86_64-apple-darwin -p pi-natives
+                cp target/x86_64-apple-darwin/local/libpi_natives.dylib \
+                   "packages/natives/native/pi_natives.darwin-x64-$VARIANT.node"
+              done
+              bun scripts/stamp-native-version.ts packages/natives/native/pi_natives.darwin-x64-modern.node
+              bun scripts/stamp-native-version.ts packages/natives/native/pi_natives.darwin-x64-baseline.node
+              ls -la packages/natives/native/
+
+         # musl and win32 addons link through bazel toolchains (zig cc for
+         # musl, clang-cl+xwin for msvc) — cargo rejects cdylib for musl
+         # targets, and msvc build-scripts need the hermetic cc toolchain.
+         # Cold build pulls zig/xwin/nightly-rust itself (hermetic repos).
+         - name: Build native addon (bazel cross)
+           if: matrix.target_id == 'win32-x64' || matrix.target_id == 'linux-musl-x64' || matrix.target_id == 'linux-musl-arm64'
+           run: |
+              set -euo pipefail
+              curl -fsSL https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-amd64 \
+                -o /usr/local/bin/bazelisk && chmod +x /usr/local/bin/bazelisk
+              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+              # One bazel invocation per addon: each cdylib link peaks at
+              # several GiB of rustc RSS and parallel links OOM 16GB runners.
+              case "${{ matrix.target_id }}" in
+                win32-x64)        BZL=natives-win32-x64-baseline; OUT=pi_natives.win32-x64-baseline.node ;;
+                linux-musl-x64)   BZL=natives-linux-musl-x64-baseline; OUT=pi_natives.linux-x64-baseline.node ;;
+                linux-musl-arm64) BZL=natives-linux-musl-arm64; OUT=pi_natives.linux-arm64.node ;;
+              esac
+              bazelisk build "//:$BZL"
+              cp -L "bazel-bin/$BZL/$OUT" "packages/natives/native/$OUT"
+              bun scripts/stamp-native-version.ts "packages/natives/native/$OUT"
+
+         - name: Build release binary
+           env:
+              RELEASE_TARGETS: ${{ matrix.target_id }}
+              # No Apple signing secrets in the fork: compile-binary's own
+              # MACOS_SIGNING guard skips codesigning when this is unset/empty.
+              MACOS_SIGNING: ""
+           run: bun run ci:release:build-binaries
+
+         - name: Smoke (host-runnable only)
+           if: matrix.target_id != 'win32-x64' && matrix.target_id != 'linux-musl-x64' && matrix.target_id != 'linux-musl-arm64'
+           run: |
+              runtime_dir="$(mktemp -d)"
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --version
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --smoke-test
+
+         - name: Stage artifact
+           shell: bash
+           run: |
+            set -euo pipefail
+            test -f "${{ matrix.binary_path }}"
+            mkdir -p dist
+            cp "${{ matrix.binary_path }}" dist/
+            git rev-parse HEAD > "dist/omp-${{ matrix.target_id }}.commit"
+
+         - uses: actions/upload-artifact@v4
+           with:
+            name: omp-${{ matrix.target_id }}
+            path: dist/*
+            if-no-files-found: error
+            retention-days: 7
+
+   release:
+      name: checksums + GitHub Release
+      needs: build
+      runs-on: ubuntu-24.04
+      steps:
+         - uses: actions/checkout@v4
+           with:
+            ref: ${{ inputs.tag || github.ref }}
+
+         - uses: actions/download-artifact@v4
+           with:
+            path: dist
+            merge-multiple: true
+
+         - name: Checksums
+           run: |
+            cd dist
+            sha256sum omp-* > SHA256SUMS
+            cat SHA256SUMS
+
+         - name: Resolve tag
+           id: tag
+           run: |
+            if [ -n "${{ inputs.tag }}" ]; then
+              echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+              echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            else
+              echo "name=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+            fi
+
+         - name: GitHub Release
+           uses: softprops/action-gh-release@v2
+           with:
+            tag_name: ${{ steps.tag.outputs.name }}
+            name: omp ${{ steps.tag.outputs.name }} (dakera)
+            body: |
+               Fork build of **oh-my-pi** with the Dakera self-hosted memory backend
+               (upstream PR can1357/oh-my-pi#12987).
+
+               Binaries: `chmod +x omp-<platform>` and put it on PATH.
+
+               Dakera memory config (`~/.omp/agent/config.yml`):
+               ```yaml
+               memory:
+                 backend: dakera
+               dakera:
+                 apiUrl: https://your-dakera-host
+                 apiToken: <scoped key>
+                 agentId: <your-agent>
+               ```
+            files: |
+               dist/omp-*
+               dist/SHA256SUMS
+            prerelease: true
