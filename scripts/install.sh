@@ -268,6 +268,16 @@ install_binary() {
     curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 30 "$BINARY_URL" -o "${INSTALL_DIR}/omp"
     chmod +x "${INSTALL_DIR}/omp"
 
+    # macOS: taskgated SIGKILLs downloaded ad-hoc-signed binaries (provenance
+    # xattr), so a bun-compiled release that runs fine on the build machine is
+    # killed on the user's arm64 Mac with "zsh: killed". Developer-ID-signed
+    # releases are untouched by this; only re-sign when the artifact is ad-hoc.
+    if [ "$(uname)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
+        if codesign -dv "${INSTALL_DIR}/omp" 2>&1 | grep -q "Signature=adhoc"; then
+            codesign --force --sign - "${INSTALL_DIR}/omp" >/dev/null 2>&1 || true
+        fi
+    fi
+
     # Verify the freshly installed binary can actually start before reporting
     # success. Bun's musl-target binaries link libstdc++/libgcc dynamically,
     # which stock Alpine/musl systems do not ship, so the download succeeds while
