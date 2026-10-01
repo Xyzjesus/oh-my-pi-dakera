@@ -160,6 +160,11 @@ jobs:
    release:
       name: checksums + GitHub Release
       needs: build
+      # fail-fast: false only spares sibling legs; plain `needs` still skips the
+      # release job when ANY leg fails, contradicting the matrix comment (a leg
+      # may fail and the release should ship without that platform).
+      # download-artifact@v4 warns on missing artifacts, so absent legs degrade.
+      if: ${{ !cancelled() }}
       runs-on: ubuntu-24.04
       steps:
          - uses: actions/checkout@v4
