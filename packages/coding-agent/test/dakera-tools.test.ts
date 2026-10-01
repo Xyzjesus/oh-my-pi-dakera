@@ -5,6 +5,7 @@ import { dakeraBackend } from "@oh-my-pi/pi-coding-agent/dakera/backend";
 import { loadDakeraConfig } from "@oh-my-pi/pi-coding-agent/dakera/config";
 import { DakeraSessionState, setDakeraSessionState } from "@oh-my-pi/pi-coding-agent/dakera/state";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { type SessionMemoryHost, SessionMemory } from "@oh-my-pi/pi-coding-agent/session/session-memory";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
 import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
@@ -237,5 +238,44 @@ describe("backend.start (Dakera)", () => {
 
 		// Empty entries → no closing summary → the fallback note ends the row.
 		expect(sessionEnd).toHaveBeenCalledWith("omp", "srv-sess-1", "omp: memory backend switched");
+	});
+});
+
+describe("SessionMemory dispose (Dakera backend)", () => {
+	// Live `dakera.*` settings edits re-apply the backend: the old state is
+	// detached and disposed inside SessionMemory, where start()'s
+	// replaced-state close never fires — the dispose path must close the
+	// server session row itself or every settings edit leaks an open row.
+	it("ends the server session row when the memory state is disposed without a restart", async () => {
+		const sessionEnd = vi.spyOn(DakeraApi.prototype, "sessionEnd").mockResolvedValue(undefined);
+		const target = {
+			sessionManager: { getSessionId: () => "durable-1", getEntries: () => [] },
+		} as unknown as AgentSession;
+		const state = stateFor(configured);
+		await state.retainItems([{ content: "a fact" }]); // registers → srv-sess-1
+		setDakeraSessionState(target, state);
+		const host = {
+			agent: { sessionId: "sess-1" },
+			settings: configured,
+			modelRegistry: {},
+			isDisposed: () => false,
+			cwd: () => "/tmp/proj",
+			addDisposer: () => {},
+			emitNotice: () => {},
+			memoryBackendSession: () => target,
+			getHindsightSessionState: () => undefined,
+			setHindsightSessionState: () => {},
+			getMnemopiSessionState: () => undefined,
+			takeMnemopiSessionState: () => undefined,
+			setBaseSystemPrompt: () => {},
+			refreshBaseSystemPrompt: async () => {},
+			replaceMemoryTools: async () => {},
+		} as unknown as SessionMemoryHost;
+
+		// No memoryAgentDir → the apply disposes the attached state and starts nothing.
+		await new SessionMemory(host, {}).applyMemoryBackend();
+
+		// Empty entries → no closing summary → the fallback note ends the row.
+		expect(sessionEnd).toHaveBeenCalledWith("omp", "srv-sess-1", "omp: memory backend disposed");
 	});
 });

@@ -132,6 +132,40 @@ describe("DakeraSessionState.retainItems", () => {
 		);
 		expect(await stateFor().retainItems([{ content: "a fact" }])).toBe(1);
 	});
+
+	// A store entering while the first registration is still in flight (a tool
+	// retain racing the first auto-retain publish) must join it: racing ahead
+	// stamps rows with the local session id the Dakera UI does not group by.
+	it("concurrent stores share one registration and the server-minted id", async () => {
+		const registration = Promise.withResolvers<unknown>();
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (input, init) => {
+				const url = String(input);
+				requests.push({
+					method: String(init?.method ?? "GET"),
+					url,
+					body: init?.body === undefined ? {} : (JSON.parse(String(init.body)) as Record<string, unknown>),
+				});
+				if (url.endsWith("/v1/sessions/start")) {
+					return new Response(JSON.stringify(await registration.promise), { status: 200 });
+				}
+				return new Response(JSON.stringify({ stored: [{ id: "m1" }] }), { status: 200 });
+			}),
+		);
+		const state = stateFor();
+		const first = state.retainItems([{ content: "from the tool" }]);
+		const second = state.retainItems([{ content: "from auto-retain" }]);
+		for (let hop = 0; hop < 50 && !requests.some(r => r.url.endsWith("/v1/sessions/start")); hop++) {
+			await Promise.resolve();
+		}
+		registration.resolve({ session: { id: "srv-conc" } });
+		expect(await Promise.all([first, second])).toEqual([1, 1]);
+
+		expect(requests.filter(r => r.url.endsWith("/v1/sessions/start"))).toHaveLength(1);
+		for (const store of storeRequests()) {
+			for (const memory of storedMemories(store)) expect(memory?.session_id).toBe("srv-conc");
+		}
+	});
 });
 
 describe("DakeraSessionState.retainTranscript", () => {
@@ -481,6 +515,46 @@ describe("DakeraSessionState.retainTranscript", () => {
 
 		expect(requests.filter(r => r.method === "PUT")).toHaveLength(0);
 		expect(storeRequests()).toHaveLength(0);
+	});
+
+	// A conversation reset (`/new`, fork, branch switch) bumps the retain
+	// generation under the same provider session id. Adopting the previous
+	// conversation's row after the reset would send the next retain into the
+	// update branch and PUT-overwrite that conversation's transcript row
+	// server-side — the caller's own re-check protects only its own write.
+	it("does not adopt a transcript row a conversation reset invalidated", async () => {
+		const listing = Promise.withResolvers<unknown>();
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (input, init) => {
+				const url = String(input);
+				requests.push({ method: String(init?.method ?? "GET"), url, body: {} });
+				if (url.includes("/memories")) return new Response(JSON.stringify(await listing.promise), { status: 200 });
+				return new Response(JSON.stringify({ stored: [{ id: "fresh-row" }] }), { status: 200 });
+			}),
+		);
+		const state = stateFor({}, { durableSessionId: "sess-1" });
+		const pending = state.retainTranscript(messages);
+		for (let hop = 0; hop < 50 && !requests.some(r => r.url.includes("/memories")); hop++) {
+			await Promise.resolve();
+		}
+		state.resetConversationTracking();
+		listing.resolve({
+			memories: [
+				{
+					id: "old-row",
+					content: "previous conversation",
+					memory_type: "episodic",
+					metadata: { "omp-transcript": "sess-1" },
+				},
+			],
+		});
+		await pending;
+
+		// The reset conversation retains a fresh row: POST only, never a PUT to
+		// the row the reset severed.
+		await state.retainTranscript(messages);
+		expect(requests.filter(r => r.method === "PUT")).toHaveLength(0);
+		expect(storeRequests()).toHaveLength(1);
 	});
 });
 
