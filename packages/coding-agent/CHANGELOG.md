@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `memory.backend: dakera` for self-hosted [Dakera](https://dakera.ai) memory: automatic recall on the first turn and transcript retention on agent end, working `recall`, `retain`, and client-synthesized `reflect`, per-repository, per-project-tagged, or global `agent_id` scoping (pinnable per repository with `dakera.agentId` in `.omp/config.yml`; `/memory clear` wipes only the project's tagged rows under a shared id), and `DAKERA_*` overrides for every `dakera.*` setting but `agentIdPrefix`.
+
+### Fixed
+
+- Fixed Dakera transcript recovery adopting a row that a conversation reset (`/new`, fork, branch switch) had just invalidated, which made the next retention overwrite the previous conversation's server-side transcript; concurrent stores now also share one server session registration instead of stamping early rows with the local session id, and disposing the memory backend (live `dakera.*` settings edits, backend switches) closes the server session row instead of leaking it open.
+
 ## [18.4.9] - 2026-10-01
 
 ### Added
