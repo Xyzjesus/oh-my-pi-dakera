@@ -5,6 +5,8 @@
 ### Added
 
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
+- Dakera recall now renders document chunks with their provenance (`[doc:<title> #<i>/<N> «<heading>»]`) and stops double-spending the block budget: a transcript drops out when its derived fragment already rendered, and duplicate row ids never render twice ([#12987](https://github.com/can1357/oh-my-pi/pull/12987) by [@Xyzjesus](https://github.com/Xyzjesus))
+- Dakera's recall block budget rose from 1500 to 6000 characters (~1500 tokens): measured on 30 live recalls, the old budget fit 7 rows and missed 12% of the top-3 facts; the new one fits 21 rows and covers 98% at a cost comparable to other memory backends ([#12987](https://github.com/can1357/oh-my-pi/pull/12987) by [@Xyzjesus](https://github.com/Xyzjesus))
 
 ### Fixed
 
@@ -579,6 +581,9 @@
 - Fixed sessions whose first reply starts with a todo plan getting a title without its icon and code: the plan's title refresh no longer replaces the card title that is still being generated
 - Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
+### Added
+
+- Added `memory.backend: dakera` for self-hosted [Dakera](https://dakera.ai) memory: automatic recall on the first turn and transcript retention on agent end, working `recall`, `retain`, and client-synthesized `reflect`, per-repository, per-project-tagged, or global `agent_id` scoping (pinnable per repository with `dakera.agentId` in `.omp/config.yml`; `/memory clear` wipes only the project's tagged rows under a shared id), and `DAKERA_*` overrides for every `dakera.*` setting but `agentIdPrefix` ([#12987](https://github.com/can1357/oh-my-pi/pull/12987) by [@Xyzjesus](https://github.com/Xyzjesus))
 
 ## [18.12.2] - 2026-10-18
 
