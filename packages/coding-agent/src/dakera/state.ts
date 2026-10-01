@@ -134,6 +134,8 @@ export class DakeraSessionState {
 	#retainGeneration = 0;
 	/** Whether the server session row for the current sessionId exists (registered lazily with the first store). */
 	#sessionRegisteredFor?: string;
+	/** Registration attempt still in flight; concurrent stores join it instead of passing the half-set guard. */
+	#registrationInFlight?: Promise<void>;
 	/** Session id whose transcript memory recovery already ran (or failed permanently). */
 	#sessionRecoveredFor?: string;
 	/** Server-minted session id; the requested one is advisory and gets ignored. */
@@ -327,10 +329,29 @@ export class DakeraSessionState {
 	 * A failed registration is non-fatal — memories then carry the local id.
 	 */
 	async #ensureSessionRegistered(): Promise<void> {
+		// A store entering while a registration is still in flight must join it:
+		// the fast guard below is set synchronously before the server answers, so
+		// checking it first would let the joiner stamp its rows with the local
+		// session id. A failed attempt keeps the documented local-id grouping; the
+		// next store retries.
+		if (this.#registrationInFlight) {
+			await this.#registrationInFlight;
+			return;
+		}
 		if (this.#sessionRegisteredFor === this.sessionId) return;
 		const generation = this.#retainGeneration;
 		const requestedId = this.sessionId;
 		this.#sessionRegisteredFor = requestedId;
+		const attempt = this.#registerServerSession(generation, requestedId);
+		this.#registrationInFlight = attempt;
+		try {
+			await attempt;
+		} finally {
+			if (this.#registrationInFlight === attempt) this.#registrationInFlight = undefined;
+		}
+	}
+
+	async #registerServerSession(generation: number, requestedId: string): Promise<void> {
 		try {
 			const serverId = await this.client.sessionStart(this.agentId, requestedId, {
 				source: "omp",
@@ -488,6 +509,12 @@ export class DakeraSessionState {
 		this.#sessionRecoveredFor = this.sessionId;
 		try {
 			const memories = await this.client.listMemories(this.agentId, { limit: RECOVERY_LIST_LIMIT });
+			// A rekey or conversation reset landed while the listing was in
+			// flight: adopting a row now would resurrect an id the reset just
+			// invalidated — the caller's own re-check protects its write, but
+			// the adopted id would send the next publish into the update branch
+			// against the previous conversation's transcript row.
+			if (this.#retainGeneration !== generation) return;
 			const candidates = memories.filter(
 				memory =>
 					memory.id !== undefined &&
@@ -499,8 +526,6 @@ export class DakeraSessionState {
 			const latest = candidates.reduce((best, current) =>
 				(timestampOf(current.updated_at) ?? 0) > (timestampOf(best.updated_at) ?? 0) ? current : best,
 			);
-			// A rekey/clear landed while the listing was in flight: adopting its
-			// row now would resurrect an id the reset just invalidated.
 			if (latest.id) {
 				this.#transcriptMemoryId = latest.id;
 				if (this.config.debug) {

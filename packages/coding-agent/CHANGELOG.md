@@ -4,9 +4,6 @@
 ### Added
 
 - Added `memory.backend: dakera` for self-hosted [Dakera](https://dakera.ai) memory: automatic recall on the first turn and transcript retention on agent end, working `recall`, `retain`, and client-synthesized `reflect`, per-repository, per-project-tagged, or global `agent_id` scoping (pinnable per repository with `dakera.agentId` in `.omp/config.yml`; `/memory clear` wipes only the project's tagged rows under a shared id), and `DAKERA_*` overrides for every `dakera.*` setting but `agentIdPrefix`.
-
-### Added
-
 - Added an opt-in `omp gc --stale` phase (or setting `gc.stale`) that prunes custom-session markers and terminal breadcrumbs whose session file is gone, and expires old debug reports and collab replicas beyond `gc.staleRetainNewest` (20) and `gc.staleRetainDays` (30) ([#14006](https://github.com/can1357/oh-my-pi/pull/14006) by [@H4vC](https://github.com/H4vC))
 - Added the RPC `cancel_subagent` command (and `RpcClient.cancelSubagent()`) to hard-kill one running subagent, foreground or background, without aborting the session ([#13481](https://github.com/can1357/oh-my-pi/pull/13481) by [@andrebrait](https://github.com/andrebrait)); supersedes [#8666](https://github.com/can1357/oh-my-pi/pull/8666) by [@13kparkin](https://github.com/13kparkin)
 - Added the RPC `steer_subagent` command (and `RpcClient.steerSubagent()`) to message a running subagent as its user, like Agent Hub chat ([#13482](https://github.com/can1357/oh-my-pi/pull/13482) by [@andrebrait](https://github.com/andrebrait)); ported from [#10427](https://github.com/can1357/oh-my-pi/pull/10427) by [@agenticfreedom](https://github.com/agenticfreedom)
@@ -45,6 +42,10 @@
 
 - Fixed the native composer's effort chip showing the main session's thinking level while viewing a subagent
 - Fixed `omp predict`'s compare view and the MCP authorization link prompt drawing as pre-rendered `rows` fallback grids in Tern; both now describe themselves natively (the link opens or copies on click)
+
+### Fixed
+
+- Fixed Dakera transcript recovery adopting a row that a conversation reset (`/new`, fork, branch switch) had just invalidated, which made the next retention overwrite the previous conversation's server-side transcript; concurrent stores now also share one server session registration instead of stamping early rows with the local session id, and disposing the memory backend (live `dakera.*` settings edits, backend switches) closes the server session row instead of leaking it open.
 
 ## [18.4.6] - 2026-10-01
 
@@ -138,7 +139,6 @@
 ### Fixed
 
 - Fixed the `mnemopi.polyphonicRecall` and `mnemopi.enhancedRecall` settings (and `MNEMOPI_POLYPHONIC_RECALL` / `MNEMOPI_ENHANCED_RECALL`) having no effect: polyphonic recall now surfaces graph- and fact-linked memories, enhanced recall caches repeated recalls until the next memory write, and both apply per session instead of through process-wide defaults ([#2323](https://github.com/can1357/oh-my-pi/issues/2323))
-- Fixed Dakera session rows leaking open in the server UI: provider-session rekeys (compaction, `/reset`, `/fresh`), registrations that lost their race with a rekey, memory-backend switches, and summary-less session disposals now close their server rows instead of leaving them open forever.
 - Fixed `computer.window(74)` matching every open window and `computer.window({ id: 74 })` matching none; a numeric id now resolves the same window as `"74"` ([#13649](https://github.com/can1357/oh-my-pi/pull/13649) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `/fast on` showing fast mode as active on Codex models whose discovered service tiers list others but not priority; it now reports that fast mode is unavailable for the current model. Models whose tier list is empty keep `/fast` ([#13782](https://github.com/can1357/oh-my-pi/pull/13782) by [@H4vC](https://github.com/H4vC)).
 - Cancelling a concurrently queued prompt now preserves the other prompt's hidden keyword context instead of removing it with the cancelled message ([#11872](https://github.com/can1357/oh-my-pi/pull/11872) by [@andrebrait](https://github.com/andrebrait)).
