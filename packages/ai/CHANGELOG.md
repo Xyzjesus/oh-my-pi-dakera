@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed every request rewriting unchanged credentials and session stickiness in agent.db, which bumped the cross-process auth revision and made other omp processes reload credentials for nothing ([#14001](https://github.com/can1357/oh-my-pi/pull/14001) by [@H4vC](https://github.com/H4vC))
+
 ## [18.4.6] - 2026-10-01
 
 ### Fixed
