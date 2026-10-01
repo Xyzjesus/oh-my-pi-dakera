@@ -21,7 +21,7 @@
 
 ## Registration / Visibility
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`.
-- The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"dakera"`; it is absent for `"off"` and `"local"`.
+- The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"dakera"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`), and Dakera requires `isDakeraConfigured(loadDakeraConfig(...))`.
 - In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for any of those backends. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://recall`; an explicitly requested tool remains top-level.
 - Execution is single-shot. The tool does not emit streaming argument/result updates.
@@ -92,7 +92,7 @@ When no matches exist:
 - Dakera scoping (the isolation unit is the `agent_id`; there is no bank):
   - `global` — one agent id, so every project's memories mix; retains carry a `project:<label>` tag that recall cannot filter on.
   - `per-project` — `[<prefix>-]<agentId|omp>-<project label>` (project label from the git primary checkout root basename; cwd basename outside a repo), so projects cannot read each other's memories. A `dakera.agentId` in the repository's `.omp/config.yml` replaces that whole derived id — see `docs/memory.md`.
-  - `per-project-tagged` is not offered: recall has no tag filter, so a shared id with per-project tags would retain into a scope it could never read back.
+  - `per-project-tagged` — shared agent id; retains carry a `project:<label>` tag and recall filters on that tag plus `dakera.globalTag` (ANY-match), so project-tagged and global memories can both surface. An empty `dakera.globalTag` disables global mixing (strict project isolation). See `docs/memory.md`.
 
 ## Side Effects
 - Network

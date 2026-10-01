@@ -311,6 +311,16 @@ export class SessionMemory {
 			} catch (error) {
 				logger.warn("Memory lifecycle: Dakera drain failed", { error: String(error) });
 			}
+			// This path runs on live `dakera.*` settings edits and backend switches,
+			// where `dakeraBackend.start()`'s replaced-state close never fires (the
+			// state is detached here before start sees it). The row will never see
+			// another write — close it (no-op when nothing registered) instead of
+			// leaking it open in the Dakera UI.
+			try {
+				await dakera.endSessionWithSummary(dakera.buildClosingSummary() ?? "omp: memory backend disposed");
+			} catch (error) {
+				logger.warn("Memory lifecycle: Dakera session close failed", { error: String(error) });
+			}
 			dakera.dispose();
 		}
 	}
