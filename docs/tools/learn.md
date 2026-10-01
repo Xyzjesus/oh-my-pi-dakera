@@ -12,7 +12,7 @@
 ## Registration / Visibility
 - `loadMode = "essential"` and `strict = true`, so the tool remains top-level rather than mounting under `xd://`.
 - Approval is dynamic: a call containing `skill` or `scope: "global"`, or any call while `memory.backend = "local"`, has `approval = "write"`; any other memory-only Hindsight/Mnemopi/Dakera call has `approval = "read"`.
-- Registration requires `autolearn.enabled = true` (default `false`) and `memory.backend` equal to `"hindsight"`, `"mnemopi"`, `"dakera"`, or `"local"`. For `"dakera"` the tool additionally requires a configured `dakera.apiUrl`.
+- Registration requires `autolearn.enabled = true` (default `false`) and `memory.backend` equal to `"hindsight"`, `"mnemopi"`, `"dakera"`, or `"local"`. Hindsight additionally requires a configured backend (`isHindsightConfigured(loadHindsightConfig(settings))`), and Dakera requires `isDakeraConfigured(loadDakeraConfig(settings))`.
 - Enabled top-level sessions auto-include `learn` in an ordinary explicit tool list. Subagents do not discover or auto-receive it, but may use it when their requested-tools/frontmatter list explicitly includes it.
 - Execution is single-shot and emits no progress updates.
 
@@ -35,9 +35,9 @@
 - Authored-skill name conflict returns `isError: true` after storing/queueing the lesson and reports `details = { skill: null, shadowed: true }`.
 
 ## Flow
-1. `LearnTool.createIf(...)` exposes the tool only when `autolearn.enabled` is true and `memory.backend` is `"hindsight"`, `"mnemopi"`, `"dakera"`, or `"local"` (and the remote backend is configured).
+1. `LearnTool.createIf(...)` checks `autolearn.enabled`, the supported backend, and that backend's configuration when a remote one is selected.
 2. `execute(...)` stores the lesson before attempting any skill mutation:
-   - Mnemopi: for `scope: "global"`, first resolves `state.getGlobalRetainTarget()`, which throws under `per-project` scoping before anything is stored or any skill is written; then calls `rememberScoped(...)` (with that target for a global lesson) with `source: "coding-agent-learn"`, `importance: 0.8`, `scope: "bank"`, extraction enabled, `veracity: "tool"`, `memoryType: "fact"`, and session/cwd/context metadata; an absent returned id is treated as failure.
+   - Mnemopi: for `scope: "global"`, first resolves `state.getGlobalRetainTarget()`, which throws under `per-project` scoping before anything is stored or any skill is written; then calls `rememberScoped(...)` (with that target for a global lesson) with `source: "coding-agent-learn"`, `importance: 0.8`, `scope: "bank"`, fact and entity extraction enabled, `veracity: "tool"`, `memoryType: "fact"`, and session/cwd/context metadata. A thrown storage error is reported as `Mnemopi did not store the lesson: <reason>`; the return value is not checked.
    - Dakera: calls `state.retainItems([{ content, context, importance: 0.8 }])`, which stores one `memory_type: "semantic"` row synchronously (context in metadata, secrets redacted); a returned count of `0` is treated as failure.
    - Local backend: calls `localBackend.save(...)`, which normalizes and writes a project-scoped `learned.md`; `stored === 0` is treated as failure.
    - Local backend and Hindsight reject `scope: "global"` with `Global memory scope is only available with the Mnemopi backend.` before storing, queueing, or writing a skill.
@@ -68,11 +68,11 @@
 - Managed descriptions are collapsed to one line and stripped of control/format characters, angle brackets, backticks, and repeated tildes.
 - Final managed `SKILL.md` content, including generated frontmatter and description, is capped at `64_000` UTF-8 bytes.
 - Managed skills never override authored skills; authored names win discovery.
-- Local lessons are newest-first and deduplicated by normalized rendered line, with at most 100 lesson bullets. Lesson content is capped at 2,000 characters and context at 400 after prompt-injection neutralization and secret redaction.
+- Local lessons are newest-first and deduplicated by normalized rendered line, with at most 100 lesson bullets. Lesson content is capped at 2,000 characters and context at 400 after prompt-injection neutralization and secret redaction. Writes serialize per lesson file in-process and preserve hand-edited headings, prose, and blank lines outside the lesson bullets.
 
 ## Errors
 - `Mnemopi backend is not initialised for this session.` when Mnemopi state is missing.
-- `Mnemopi did not store the lesson (no memory id returned).` when the local Mnemopi write returns no id; the optional skill is not attempted.
+- `Mnemopi did not store the lesson: <reason>` when the synchronous Mnemopi write throws; the optional skill is not attempted.
 - `Lesson was empty after sanitization; nothing stored.` when local-backend normalization yields no lesson; the optional skill is not attempted.
 - `Hindsight backend is not initialised for this session.` when Hindsight state is missing.
 - `Dakera backend is not initialised for this session.` when Dakera state is missing, and `Dakera did not store the lesson (no memory id returned).` when the store yields no addressable id; the optional skill is not attempted either way.
