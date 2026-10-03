@@ -6,8 +6,11 @@
  * deliver Shift+Enter as a bare `\r` (indistinguishable from Enter) and
  * Ctrl+Enter as `\n`. Enabling `CSI ? 9001 h` makes the console host serving
  * this process report every key as `CSI Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`, which
- * carries the full modifier state. Paste text, mouse reports and terminal
- * replies keep arriving as plain VT, so only key records need translating.
+ * carries the full modifier state. Mouse reports and terminal replies keep
+ * arriving as plain VT. Pasted text mostly does too, but the console host
+ * re-encodes some pasted characters (line breaks) as key records inside the
+ * bracketed paste; {@link Win32InputModeDecoder.decodePaste} turns those back
+ * into text.
  *
  * Unmodified and legacy-expressible keys translate to the bytes a legacy
  * terminal sends; chords legacy encoding loses (modified Enter/Tab/Escape,
@@ -16,6 +19,7 @@
  */
 
 const W32IM_PATTERN = /^\x1b\[([\d;]*)_$/;
+const W32IM_RECORDS = /\x1b\[[\d;]*_/g;
 
 const RIGHT_ALT_PRESSED = 0x0001;
 const LEFT_ALT_PRESSED = 0x0002;
@@ -189,6 +193,26 @@ export class Win32InputModeDecoder {
 		return Array.from({ length: record.repeat }, () => encoded);
 	}
 
+	/**
+	 * Replace the key records embedded in bracketed paste `content` with the
+	 * text they type, so a pasted line break stays a line break instead of
+	 * acting as Enter. Key-downs yield their character (`\r` for Enter);
+	 * releases and keys without text yield nothing. Text that merely looks like
+	 * a record without ESC is left alone.
+	 */
+	decodePaste(content: string): string {
+		if (!content.includes("\x1b[")) return content;
+		this.#pendingHighSurrogate = 0;
+		const decoded = content.replace(W32IM_RECORDS, match => {
+			const record = parseRecord(match);
+			if (!record) return match;
+			if (!record.down) return "";
+			return this.#emitText(record.uc, record.repeat).join("");
+		});
+		this.#pendingHighSurrogate = 0;
+		return decoded;
+	}
+
 	#emitText(codeUnit: number, repeat = 1): string[] {
 		if (codeUnit === 0) return [];
 		if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
@@ -202,5 +226,115 @@ export class Win32InputModeDecoder {
 		}
 		this.#pendingHighSurrogate = 0;
 		return Array.from({ length: repeat }, () => text);
+	}
+}
+
+const RECORD_AT_START = /^\x1b\[[\d;]*_/;
+const RECORD_PREFIX = /^\x1b\[[\d;]*$/;
+const MAX_RECORD_LENGTH = 64;
+
+/**
+ * Restores paste delimiters that a Windows console host emitted as individual
+ * win32-input-mode key records before StdinBuffer searches for the delimiters.
+ * Non-matching records remain untouched for normal key and paste decoding.
+ */
+export class Win32PasteMarkerNormalizer {
+	#pending = "";
+	#candidate = "";
+	#index = 0;
+	#marker = "";
+	#timer?: NodeJS.Timeout;
+	readonly #onInput: (data: string) => void;
+
+	constructor(onInput: (data: string) => void) {
+		this.#onInput = onInput;
+	}
+
+	process(data: string): void {
+		if (!this.#pending && !this.#candidate && !data.includes("\x1b")) {
+			this.#onInput(data);
+			return;
+		}
+		clearTimeout(this.#timer);
+		this.#timer = undefined;
+		this.#pending += data;
+		let output = "";
+
+		while (this.#pending.length > 0) {
+			const escape = this.#pending.indexOf("\x1b");
+			if (escape > 0) {
+				output += this.#candidate + this.#pending.slice(0, escape);
+				this.#candidate = "";
+				this.#index = 0;
+				this.#pending = this.#pending.slice(escape);
+			} else if (escape === -1) {
+				output += this.#candidate + this.#pending;
+				this.#candidate = "";
+				this.#index = 0;
+				this.#pending = "";
+				break;
+			}
+
+			if (this.#pending.length === 1) break;
+			if (this.#pending[1] !== "[") {
+				output += this.#candidate + this.#pending[0];
+				this.#candidate = "";
+				this.#index = 0;
+				this.#pending = this.#pending.slice(1);
+				continue;
+			}
+			const record = RECORD_AT_START.exec(this.#pending)?.[0];
+			if (!record) {
+				if (this.#pending.length <= MAX_RECORD_LENGTH && RECORD_PREFIX.test(this.#pending)) break;
+				output += this.#candidate + this.#pending[0];
+				this.#candidate = "";
+				this.#index = 0;
+				this.#pending = this.#pending.slice(1);
+				continue;
+			}
+
+			this.#pending = this.#pending.slice(record.length);
+			const key = parseRecord(record);
+			if (this.#candidate && key && !key.down) {
+				this.#candidate += record;
+				continue;
+			}
+			if (key?.down && key.state === 0 && key.repeat === 1) {
+				const expected = this.#index === 0 ? 27 : "[200~".charCodeAt(this.#index - 1);
+				if (key.uc === expected || (this.#index === 4 && key.uc === 49)) {
+					if (this.#index === 4) this.#marker = String.fromCharCode(key.uc);
+					this.#candidate += record;
+					if (++this.#index === 6) {
+						output += `\x1b[20${this.#marker}~`;
+						this.#candidate = "";
+						this.#index = 0;
+					}
+					continue;
+				}
+			}
+			output += this.#candidate;
+			this.#candidate = "";
+			this.#index = 0;
+			if (key?.down && key.state === 0 && key.repeat === 1 && key.uc === 27) {
+				this.#candidate = record;
+				this.#index = 1;
+			} else {
+				output += record;
+			}
+		}
+
+		if (output) this.#onInput(output);
+		if (this.#candidate || this.#pending) this.#timer = setTimeout(() => this.flush(), 75);
+	}
+
+	/** Release an incomplete marker as its original key records. */
+	flush(): void {
+		clearTimeout(this.#timer);
+		this.#timer = undefined;
+		const raw = this.#candidate + this.#pending;
+		this.#candidate = "";
+		this.#pending = "";
+		this.#index = 0;
+		if (raw) this.#onInput(raw);
 	}
 }
