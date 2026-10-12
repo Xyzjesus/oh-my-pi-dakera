@@ -120,6 +120,32 @@ mkdir -p "$INSTALL_DIR"
 BINARY_URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}"
 echo "Downloading ${BINARY}..."
 curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 30 "$BINARY_URL" -o "${INSTALL_DIR}/omp-dakera"
+
+# Verify against the published SHA256SUMS BEFORE anything modifies the file
+# (the ad-hoc re-sign below rewrites bytes, so this check must run first).
+SUMS_URL="https://github.com/${REPO}/releases/download/${LATEST}/SHA256SUMS"
+if SUMS_FILE=$(mktemp) && curl -fsSL --connect-timeout 10 --max-time 60 "$SUMS_URL" -o "$SUMS_FILE"; then
+    EXPECTED=$(grep " ${BINARY}\$" "$SUMS_FILE" | awk '{print $1}')
+    if [ -n "$EXPECTED" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            ACTUAL=$(sha256sum "${INSTALL_DIR}/omp-dakera" | awk '{print $1}')
+        else
+            ACTUAL=$(shasum -a 256 "${INSTALL_DIR}/omp-dakera" | awk '{print $1}')
+        fi
+        if [ "$ACTUAL" != "$EXPECTED" ]; then
+            rm -f "${INSTALL_DIR}/omp-dakera" "$SUMS_FILE"
+            echo "Checksum mismatch for ${BINARY}: expected $EXPECTED, got $ACTUAL"
+            exit 1
+        fi
+        echo "Checksum OK: ${BINARY}"
+    else
+        echo "Warning: no checksum entry for ${BINARY} in SHA256SUMS"
+    fi
+    rm -f "$SUMS_FILE"
+else
+    echo "Warning: could not download SHA256SUMS — skipping checksum verification"
+fi
+
 chmod +x "${INSTALL_DIR}/omp-dakera"
 
 # macOS: taskgated SIGKILLs downloaded ad-hoc-signed binaries (provenance
