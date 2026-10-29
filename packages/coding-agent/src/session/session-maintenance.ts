@@ -110,7 +110,7 @@ import {
 	resolveContextPromotionConfiguredTarget,
 	resolveRoleModelFull,
 } from "./role-models";
-import type { SessionContext } from "./session-context";
+import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
@@ -596,6 +596,14 @@ export class SessionMaintenance {
 
 	get #tokenizer() {
 		return this.#host.agent.tokenizer;
+	}
+
+	/** Frame budget and blob resolution that rebuild a branch's context as the live session sends it. */
+	get #contextBuildOptions(): BuildSessionContextOptions {
+		return {
+			maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model),
+			resolveFrameData: data => this.#host.sessionManager.resolveFrameData(data),
+		};
 	}
 
 	get #goalModeState(): GoalModeState | undefined {
@@ -2699,14 +2707,15 @@ export class SessionMaintenance {
 	/**
 	 * Local pre-compaction context for a snapcompact preparation, measured on the
 	 * exact same non-message overhead and tokenizer as
-	 * {@link #projectSnapcompactContextTokens}: fixed overhead + the region that
-	 * would be archived (`messagesToSummarize` + `turnPrefixMessages`) + the kept
-	 * tail (`recentMessages`). Comparing the projection against this
+	 * {@link #projectSnapcompactContextTokens}: fixed overhead + the live
+	 * context's standing summary with its archive frames + the region that
+	 * would be archived (`messagesToSummarize` + `turnPrefixMessages`) + the
+	 * kept tail (`recentMessages`). Comparing the projection against this
 	 * self-consistent baseline isolates the single thing snapcompact changes —
-	 * the archived region becomes an imaged summary — so a result whose frames
-	 * cost more tokens than the text they replace is rejected, while genuine
-	 * reductions are not. Recomputed from the live messages rather than
-	 * `preparation.tokensBefore`, which carries only provider usage (zero for
+	 * the standing summary and the archived region become one imaged summary — so
+	 * a result whose frames cost more tokens than what they replace is rejected,
+	 * while genuine reductions are not. Recomputed from the live messages rather
+	 * than `preparation.tokensBefore`, which carries only provider usage (zero for
 	 * imported sessions with no usage metadata, or a deflated figure behind a
 	 * payload-shrinking hook) and would falsely reject reducing archives (#10023).
 	 *
@@ -2726,6 +2735,10 @@ export class SessionMaintenance {
 			this.#tokenizer,
 			this.#host.settings.revision,
 		);
+		// The live summary, not one rebuilt from the entry: a resumed session's
+		// archive frames are blob references only the session manager resolves.
+		const standingSummary = this.#host.messages()[0];
+		if (standingSummary?.role === "compactionSummary") tokens += this.#tokenizer.countMessage(standingSummary);
 		tokens += this.#tokenizer.countMessages(preparation.messagesToSummarize, opts);
 		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages, opts);
 		tokens += this.#tokenizer.countMessages(preparation.recentMessages, opts);
@@ -4125,9 +4138,7 @@ export class SessionMaintenance {
 			preserveData: args.preserveData,
 			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
 		};
-		const rebuilt = buildSessionContext([...branch, pending], undefined, undefined, {
-			maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model),
-		});
+		const rebuilt = buildSessionContext([...branch, pending], undefined, undefined, this.#contextBuildOptions);
 		return nonMessageTokens + this.#countProjectedMessages(rebuilt.messages);
 	}
 
@@ -4168,9 +4179,7 @@ export class SessionMaintenance {
 			this.#host.settings.revision,
 		);
 		if (branch.length === 0) return nonMessageTokens;
-		const current = buildSessionContext(branch, undefined, undefined, {
-			maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model),
-		});
+		const current = buildSessionContext(branch, undefined, undefined, this.#contextBuildOptions);
 		return nonMessageTokens + this.#countProjectedMessages(current.messages);
 	}
 
@@ -4199,9 +4208,7 @@ export class SessionMaintenance {
 		const keptEntries = firstKeptIdx >= 0 ? branch.slice(firstKeptIdx) : [];
 		const keptContext =
 			keptEntries.length > 0
-				? buildSessionContext(keptEntries, undefined, undefined, {
-						maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model),
-					})
+				? buildSessionContext(keptEntries, undefined, undefined, this.#contextBuildOptions)
 				: undefined;
 		const keptTokens = keptContext
 			? this.#countProjectedMessages(keptContext.messages)
