@@ -1,12 +1,14 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { BashInterceptorRule } from "@oh-my-pi/pi-coding-agent/exec/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { DEFAULT_BASH_INTERCEPTOR_RULES } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool, type BashToolInput } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { checkBashInterception } from "@oh-my-pi/pi-coding-agent/tools/bash-interceptor";
-import { DEFAULT_BASH_INTERCEPTOR_RULES } from "@oh-my-pi/pi-coding-agent/exec/settings";
 
 function createBashTool(rules: BashInterceptorRule[]): BashTool {
 	const session = {
@@ -380,5 +382,114 @@ describe("BashTool argument validation", () => {
 		await expect(tool.execute("tool-call", args as unknown as BashToolInput)).rejects.toThrow(
 			"Async bash execution is disabled",
 		);
+	});
+
+	it("denies intercepted commands and invalid options at the approval gate without prompting", async () => {
+		const select = vi.fn(async () => "Approve");
+		const createSession = (settingsOverrides: Record<string, unknown> = {}, toolNames = ["read", "grep", "bash"]) =>
+			({
+				cwd: process.cwd(),
+				hasUI: true,
+				getSessionFile: () => null,
+				isToolActive: (name: string) => toolNames.includes(name),
+				getToolContext: () => ({ toolNames, hasUI: true, ui: {} }) as unknown as AgentToolContext,
+				settings: Settings.isolated({
+					"async.enabled": true,
+					"launch.enabled": true,
+					"bashInterceptor.enabled": true,
+					"bashInterceptor.patterns": DEFAULT_BASH_INTERCEPTOR_RULES,
+					...settingsOverrides,
+				}),
+			}) as unknown as ToolSession;
+
+		const makeWrapper = (tool: BashTool, hasUI = true, rewrittenCommand?: string) => {
+			const runner = {
+				hasHandlers: (event: string) => rewrittenCommand !== undefined && event === "tool_call",
+				emitToolCall: async () => (rewrittenCommand ? { input: { command: rewrittenCommand } } : undefined),
+				consumeToolCallEmitted: () => false,
+				hasUI: () => hasUI,
+				getUIContext: () => ({ select }),
+				hasSessionApproval: () => false,
+				sessionId: "bash-approval-test",
+				cwd: process.cwd(),
+				runScoped: <T>(fn: () => T): T => fn(),
+			} as unknown as ExtensionRunner;
+			return new ExtensionToolWrapper(tool as Tool, runner);
+		};
+
+		const alwaysAskCtx = {
+			settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+		} as unknown as AgentToolContext;
+
+		// 1. Intercepted command in always-ask mode rejects before prompting
+		await expect(
+			makeWrapper(new BashTool(createSession())).execute(
+				"call-1",
+				{ command: "cat package.json" },
+				undefined,
+				undefined,
+				alwaysAskCtx,
+			),
+		).rejects.toThrow("Use the `read` tool instead of cat/head/tail");
+		expect(select).not.toHaveBeenCalled();
+
+		// 2. Headless write mode without UI returns the interceptor redirect error instead of missing UI error
+		await expect(
+			makeWrapper(new BashTool(createSession()), false).execute(
+				"call-2",
+				{ command: "grep foo src/file.ts" },
+				undefined,
+				undefined,
+				{ settings: Settings.isolated({ "tools.approvalMode": "write" }) } as unknown as AgentToolContext,
+			),
+		).rejects.toThrow("Use the `grep` tool instead of grep/rg");
+
+		// 3. Disabled service launch rejects before prompting
+		await expect(
+			makeWrapper(new BashTool(createSession({ "launch.enabled": false }))).execute(
+				"call-3",
+				{ command: "npm start", name: "dev" },
+				undefined,
+				undefined,
+				alwaysAskCtx,
+			),
+		).rejects.toThrow("Service launch is disabled in this session");
+		expect(select).not.toHaveBeenCalled();
+
+		// 4. Disabled async mode rejects before prompting
+		await expect(
+			makeWrapper(new BashTool(createSession({ "async.enabled": false }))).execute(
+				"call-4",
+				{ command: "sleep 10", async: true },
+				undefined,
+				undefined,
+				alwaysAskCtx,
+			),
+		).rejects.toThrow("Async bash execution is disabled");
+		expect(select).not.toHaveBeenCalled();
+
+		// 5. Virtual working directory with pty rejects before prompting
+		await expect(
+			makeWrapper(new BashTool(createSession())).execute(
+				"call-5",
+				{ command: "echo ok", cwd: "local://work", pty: true },
+				undefined,
+				undefined,
+				alwaysAskCtx,
+			),
+		).rejects.toThrow("exists only in the embedded shell; pty commands run external processes");
+		expect(select).not.toHaveBeenCalled();
+
+		// 6. Extension tool_call rewrite into an intercepted command rejects before prompting
+		await expect(
+			makeWrapper(new BashTool(createSession()), true, "cat file.txt").execute(
+				"call-6",
+				{ command: "echo ok" },
+				undefined,
+				undefined,
+				alwaysAskCtx,
+			),
+		).rejects.toThrow("Use the `read` tool instead of cat/head/tail");
+		expect(select).not.toHaveBeenCalled();
 	});
 });
