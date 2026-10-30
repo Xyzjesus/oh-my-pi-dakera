@@ -1166,7 +1166,8 @@ export class OAuthRefresher {
 				// A definitively-dead grant tears the row down here, where the
 				// attempted credential is known. CAS on the persisted credential so a
 				// peer/login rotation in flight leaves the freshly-rotated row intact.
-				if (AIError.isDefinitiveOAuthFailure(String(error))) {
+				// A usage probe is advisory: leave a dead grant for an interactive request to disable.
+				if (reason !== "usage-probe" && AIError.isDefinitiveOAuthFailure(String(error))) {
 					// CAS-loss (false) means a peer/login rotated the row mid-refresh, so
 					// our #data copy is stale — reload so the next caller serves the
 					// freshly-rotated credential rather than the dead token we attempted.

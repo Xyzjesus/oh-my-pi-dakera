@@ -1069,9 +1069,10 @@ export interface OAuthRefreshByIdOptions {
 	 */
 	reuseRecentMint?: boolean;
 	/**
-	 * Provider-401 recovery intent. Forwarded to a delegated refresh (an auth
-	 * broker), which may then return a token it minted in the last five minutes.
-	 * Local reuse still requires {@link reuseRecentMint}.
+	 * Why the refresh was requested. `auth-recovery` is forwarded to a delegated
+	 * refresh (an auth broker), which may then return a token it minted in the
+	 * last five minutes; local reuse still requires {@link reuseRecentMint}.
+	 * `usage-probe` never disables the row on a definitive refresh failure.
 	 */
 	reason?: OAuthRefreshReason;
 	/** The access token a provider 401 rejected; see {@link AuthApiKeyOptions.rejectedAccessToken}. */
