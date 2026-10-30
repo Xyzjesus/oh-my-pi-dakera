@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bash commands no longer hang on `git rebase -i` when a `sequence.editor` is set in git config files (an explicit `git -c sequence.editor=…` or inline `GIT_SEQUENCE_EDITOR` still wins), or on Git Credential Manager GUI/browser sign-in prompts.
+- The bash git guard now reads environment-provided git config entries (`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`) instead of treating any `GIT_CONFIG_COUNT` as submodule recursion, and smart `git worktree add` keeps its in-process path when those entries only set `sequence.editor`.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

@@ -172,8 +172,8 @@ If `prefix` is configured, it wraps the command after any direnv unset prefix.
 The per-command child environment is then built by `buildNonInteractiveEnv()` (`src/exec/non-interactive-env.ts`), which layers non-interactive hardening defaults **under** the caller and direnv overrides:
 
 - pagers disabled (`PAGER=cat`, `GIT_PAGER=cat`, … and `LESS=FRX`),
-- editor prompts disabled (`GIT_EDITOR=true`, `EDITOR=true`, `VISUAL=true`),
-- terminal/credential prompts reduced (`TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS` set to the resolved `false` executable or `"false"`, `NO_COLOR=1`, `CI=true` unless `PI_BASH_NO_CI`/`CLAUDE_BASH_NO_CI` is set),
+- editor prompts disabled (`GIT_EDITOR=true`, `EDITOR=true`, `VISUAL=true`; `buildNonInteractiveEnv()` also appends `sequence.editor=true` as env-provided git config via `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` after any inherited entries, so a `sequence.editor` from config files cannot block `git rebase -i` while an explicit `git -c sequence.editor=…` or inline `GIT_SEQUENCE_EDITOR` still wins; skipped when the inherited `GIT_CONFIG_COUNT` is malformed or an entry already sets `sequence.editor`),
+- terminal/credential prompts reduced (`TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` for Git Credential Manager GUI prompts, `SSH_ASKPASS` set to the resolved `false` executable or `"false"`, `NO_COLOR=1`, `CI=true` unless `PI_BASH_NO_CI`/`CLAUDE_BASH_NO_CI` is set),
 - package-manager/tooling automation flags for non-interactive behavior (npm/pnpm/yarn/pip/cargo/terraform/gh, …),
 - on Windows, UTF-8 locale/codepage defaults are added when absent.
 

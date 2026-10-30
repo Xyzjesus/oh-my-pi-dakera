@@ -3,6 +3,62 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildNonInteractiveEnv, NON_INTERACTIVE_ENV } from "@oh-my-pi/pi-coding-agent/exec/non-interactive-env";
+import { TempDir } from "@oh-my-pi/pi-utils";
+
+/** Writes a sequence-editor script that touches `markerPath` and exits with `exitCode`. */
+async function writeEditorScript(tempDir: TempDir, markerPath: string, exitCode: number): Promise<string> {
+	const editorPath = tempDir.join("sequence-editor.sh");
+	await Bun.write(editorPath, `#!/bin/sh\ntouch '${markerPath}'\nexit ${exitCode}\n`);
+	await fs.chmod(editorPath, 0o755);
+	return editorPath;
+}
+
+/**
+ * Creates a two-commit repo and returns a git runner whose env is the inherited
+ * env, isolated from user/system git config, layered with `buildNonInteractiveEnv()`.
+ */
+async function createTwoCommitRepo(tempDir: TempDir) {
+	const repoDir = tempDir.join("repo");
+	const globalConfigPath = tempDir.join("gitconfig");
+	await Bun.write(globalConfigPath, "");
+	await fs.mkdir(repoDir);
+	// Inherited git env (a user's own GIT_SEQUENCE_EDITOR or GIT_CONFIG_*, hook-provided
+	// GIT_DIR) and global/system config would mask or change the behaviour under test.
+	const inheritedEnv = Object.fromEntries(
+		Object.entries(Bun.env).filter(([key]) => !key.startsWith("GIT_") && key !== "XDG_CONFIG_HOME"),
+	);
+	const isolatedEnv = {
+		...inheritedEnv,
+		HOME: tempDir.path(),
+		GIT_CONFIG_GLOBAL: globalConfigPath,
+		GIT_CONFIG_NOSYSTEM: "1",
+	};
+	const spawnEnv = { ...isolatedEnv, ...buildNonInteractiveEnv(undefined, isolatedEnv) };
+	const git = async (...args: string[]) => {
+		const proc = Bun.spawn(["git", ...args], {
+			cwd: repoDir,
+			env: spawnEnv,
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "pipe",
+		});
+		const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+		return { exitCode, stderr };
+	};
+	for (const args of [
+		["init", "-q", "-b", "main"],
+		["config", "user.email", "t@example.com"],
+		["config", "user.name", "t"],
+	]) {
+		expect(await git(...args)).toMatchObject({ exitCode: 0 });
+	}
+	for (const name of ["first", "second"]) {
+		await Bun.write(path.join(repoDir, `${name}.txt`), `${name}\n`);
+		expect(await git("add", "-A")).toMatchObject({ exitCode: 0 });
+		expect(await git("commit", "-qm", name)).toMatchObject({ exitCode: 0 });
+	}
+	return git;
+}
 
 describe("buildNonInteractiveEnv", () => {
 	it("defaults Windows child-process encoding to UTF-8 when inherited env is unset", () => {
@@ -68,6 +124,49 @@ describe("buildNonInteractiveEnv", () => {
 		});
 
 		expect(await proc.exited).toBe(1);
+	});
+
+	it("bypasses a configured git sequence.editor during interactive rebase", async () => {
+		if (process.platform === "win32") return;
+		using tempDir = TempDir.createSync("@omp-non-interactive-rebase-");
+		const markerPath = tempDir.join("sequence-editor-ran");
+		const editorPath = await writeEditorScript(tempDir, markerPath, 1);
+		const git = await createTwoCommitRepo(tempDir);
+		expect(await git("config", "sequence.editor", `'${editorPath}'`)).toMatchObject({ exitCode: 0 });
+
+		const rebase = await git("rebase", "-i", "HEAD~1");
+
+		expect(rebase).toMatchObject({ exitCode: 0 });
+		expect(await fs.exists(markerPath)).toBe(false);
+	});
+
+	it("still runs a sequence.editor passed with git -c during interactive rebase", async () => {
+		if (process.platform === "win32") return;
+		using tempDir = TempDir.createSync("@omp-non-interactive-rebase-c-");
+		const markerPath = tempDir.join("sequence-editor-ran");
+		const editorPath = await writeEditorScript(tempDir, markerPath, 0);
+		const git = await createTwoCommitRepo(tempDir);
+
+		const rebase = await git("-c", `sequence.editor='${editorPath}'`, "rebase", "-i", "HEAD~1");
+
+		expect(rebase).toMatchObject({ exitCode: 0 });
+		expect(await fs.exists(markerPath)).toBe(true);
+	});
+
+	it("appends its git config entry after inherited GIT_CONFIG_* entries", () => {
+		const env = buildNonInteractiveEnv(
+			undefined,
+			{ GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "foo.bar", GIT_CONFIG_VALUE_0: "baz" },
+			"linux",
+		);
+
+		expect(env).not.toHaveProperty("GIT_CONFIG_KEY_0");
+		expect(env).not.toHaveProperty("GIT_CONFIG_VALUE_0");
+		expect(env).toMatchObject({
+			GIT_CONFIG_COUNT: "2",
+			GIT_CONFIG_KEY_1: "sequence.editor",
+			GIT_CONFIG_VALUE_1: "true",
+		});
 	});
 
 	it("injects clap-compatible CI=true by default", () => {
