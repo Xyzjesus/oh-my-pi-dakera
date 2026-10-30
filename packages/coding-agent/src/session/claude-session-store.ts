@@ -483,10 +483,11 @@ export class ClaudeSessionStore implements ForeignSessionStore {
 			if (parentId) sourceTails.set(sourceUuid, parentId);
 		}
 
-		// The sidecar only ever holds a user rename, so it ranks with the transcript's
-		// own custom-title and above a generated ai-title; importing it as "user" keeps
-		// omp's auto-title refresh from overwriting it.
-		const userTitle = sourceTitle ?? info.title;
+		// The sidecar only ever holds a user rename and Claude rewrites it on every rename,
+		// so it is the current name even when the transcript's last custom-title record is
+		// older; it ranks above that record and above a generated ai-title, and importing
+		// it as "user" keeps omp's auto-title refresh from overwriting it.
+		const userTitle = info.title ?? sourceTitle;
 		const title = userTitle ?? aiTitle;
 		if (title) await manager.setSessionName(title, userTitle ? "user" : "auto");
 		return manager;

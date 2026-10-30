@@ -155,10 +155,17 @@ describe("ClaudeSessionStore", () => {
 			expect(listed?.title).toBe("변경된 제목 🐈");
 			expect(listed?.firstMessage).toBe("First prompt");
 			expect(listed?.path).toBe(sessionPath);
+			if (!listed) throw new Error("sidecar fixture was not listed");
+
+			// The transcript still carries an older custom-title record ("Imported Claude") from before
+			// the rename; the sidecar is the current name, so importing the listed row must keep it.
+			const manager = await store.load(listed);
+			expect(manager.getSessionName()).toBe("변경된 제목 🐈");
+			expect(manager.titleSource).toBe("user");
 		},
 	);
 
-	it.each(["{", "null", "[]", "{}", '{"customTitle":42}', '{"customTitle":""}', '{"customTitle":"   "}'])(
+	it.each(["{", "null", "{}", '{"customTitle":42}', '{"customTitle":""}', '{"customTitle":"   "}'])(
 		"keeps a session with an invalid title sidecar (%s) in the list",
 		async contents => {
 			const { info, store } = await createClaudeFixture();
