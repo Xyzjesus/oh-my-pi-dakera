@@ -558,8 +558,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		return undefined;
 	}
 
-	#interceptionDecision(input: Partial<BashToolInput>): ToolApprovalDecision | undefined {
-		const refusal = this.#interceptionRefusal(input);
+	#interceptionDecision(input: Partial<BashToolInput>, ctx?: AgentToolContext): ToolApprovalDecision | undefined {
+		const refusal = this.#interceptionRefusal(input, ctx);
 		if (refusal !== undefined) {
 			return {
 				tier: "exec",
@@ -571,7 +571,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		return undefined;
 	}
 
-	readonly approval = (args: unknown): ToolApprovalDecision => {
+	readonly approval = (args: unknown, ctx?: AgentToolContext): ToolApprovalDecision => {
 		const input =
 			args !== null && typeof args === "object" && !Array.isArray(args) ? (args as Partial<BashToolInput>) : {};
 		const rawCommand = input.command;
@@ -626,7 +626,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				if (segmentRule?.approval === "prompt") promptRule ??= segmentRule;
 				if (!segmentRule) hasUnmatchedSegment = true;
 			}
-			const interception = this.#interceptionDecision(input);
+			const interception = this.#interceptionDecision(input, ctx);
 			if (interception) return interception;
 			if (promptRule) {
 				return {
@@ -646,7 +646,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			// Unmatched segments retain the standalone tool-policy and mode fallback.
 			return hasUnmatchedSegment ? "exec" : { tier: "write", policy: "allow" };
 		}
-		const interception = this.#interceptionDecision(input);
+		const interception = this.#interceptionDecision(input, ctx);
 		if (interception) return interception;
 		const criticalCommand = command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command));
 		if (criticalCommand) {

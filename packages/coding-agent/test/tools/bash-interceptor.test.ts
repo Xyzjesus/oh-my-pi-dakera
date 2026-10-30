@@ -432,6 +432,19 @@ describe("pre-approval refusal gate", () => {
 		expect(select).not.toHaveBeenCalled();
 	});
 
+	it("honors per-call context toolNames in approval so omitted tools are not intercepted", async () => {
+		const select = vi.fn(async () => "Approve");
+		const wrapper = makeWrapper(new BashTool(createSession()), select);
+		const context = {
+			settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+			toolNames: [],
+		} as unknown as AgentToolContext;
+
+		await wrapper.execute("call-per-call-ctx", { command: "cat package.json" }, undefined, undefined, context);
+
+		expect(select).toHaveBeenCalledTimes(1);
+	});
+
 	it("returns tool-redirect error in headless write mode without prompting or failing with missing-UI error", async () => {
 		const select = vi.fn(async () => "Approve");
 		const wrapper = makeWrapper(new BashTool(createSession()), select, false);
