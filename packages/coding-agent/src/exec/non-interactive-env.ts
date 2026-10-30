@@ -115,7 +115,7 @@ function withoutCI(env: Readonly<Record<string, string>>): Record<string, string
 
 /**
  * Env-provided git config (`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`)
- * setting `sequence.editor=true`, appended after the caller's existing entries.
+ * setting `sequence.editor=true`, appended after the entries of `env` overlaid on `baseEnv`.
  *
  * A configured `sequence.editor` outranks GIT_EDITOR, so `git rebase -i` would
  * block on the user's editor. Env config outranks config files but not
@@ -123,24 +123,28 @@ function withoutCI(env: Readonly<Record<string, string>>): Record<string, string
  * todo-list edits keep working; exporting GIT_SEQUENCE_EDITOR would silently
  * replace them with plain picks.
  *
+ * Belongs at the level of the environment a shell starts from (the persistent
+ * shell's session env, a fresh PTY shell's spawn env), never in a per-command
+ * overlay: a shell's own `export GIT_CONFIG_*` must keep replacing it.
+ *
  * Returns nothing when the existing count is malformed (the user's env is left
  * untouched) or an existing entry already sets `sequence.editor`.
  */
-function buildSequenceEditorConfigEnv(
-	overrides: Record<string, string> | undefined,
-	baseEnv: Record<string, string | undefined>,
-	platform: NodeJS.Platform,
+export function buildSequenceEditorConfigEnv(
+	env: Record<string, string> | undefined,
+	baseEnv: Record<string, string | undefined> = Bun.env,
+	platform: NodeJS.Platform = process.platform,
 ): Record<string, string> | undefined {
 	const countEntry =
-		getEnvEntry(overrides, "GIT_CONFIG_COUNT", platform) ?? getEnvEntry(baseEnv, "GIT_CONFIG_COUNT", platform);
+		getEnvEntry(env, "GIT_CONFIG_COUNT", platform) ?? getEnvEntry(baseEnv, "GIT_CONFIG_COUNT", platform);
 	const count = countEntry ? Number(countEntry[1]) : 0;
 	if (countEntry && (!/^\d+$/.test(countEntry[1]) || !Number.isSafeInteger(count))) return undefined;
 	// Scan present keys rather than looping to `count`, which the user controls.
-	// Per-command overrides shadow inherited entries at the same index.
+	// `env` shadows `baseEnv` entries at the same index.
 	const keyPattern = platform === "win32" ? /^GIT_CONFIG_KEY_(\d+)$/i : /^GIT_CONFIG_KEY_(\d+)$/;
 	const configKeys = new Map<number, string>();
-	for (const env of [baseEnv, overrides ?? {}]) {
-		for (const [key, value] of Object.entries(env)) {
+	for (const source of [baseEnv, env ?? {}]) {
+		for (const [key, value] of Object.entries(source)) {
 			const index = keyPattern.exec(key)?.[1];
 			if (index !== undefined && value !== undefined) configKeys.set(Number(index), value);
 		}
@@ -166,10 +170,8 @@ export function buildNonInteractiveEnv(
 	// reaches the per-command env, which otherwise overrides the session value.
 	const base =
 		baseEnv.PI_BASH_NO_CI || baseEnv.CLAUDE_BASH_NO_CI ? withoutCI(NON_INTERACTIVE_ENV) : NON_INTERACTIVE_ENV;
-	// Appended after `overrides` so a caller-provided GIT_CONFIG_COUNT is extended, not restored.
-	const sequenceEditorConfig = buildSequenceEditorConfigEnv(overrides, baseEnv, platform);
 	if (platform !== "win32") {
-		return { ...base, ...overrides, ...sequenceEditorConfig };
+		return overrides ? { ...base, ...overrides } : base;
 	}
 
 	const env: Record<string, string> = { ...base };
@@ -181,5 +183,5 @@ export function buildNonInteractiveEnv(
 			env[key] = value;
 		}
 	}
-	return { ...env, ...overrides, ...sequenceEditorConfig };
+	return overrides ? { ...env, ...overrides } : env;
 }
