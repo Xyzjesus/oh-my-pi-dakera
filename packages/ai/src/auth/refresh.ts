@@ -973,7 +973,9 @@ export class OAuthRefresher {
 				// `refreshStored` owns the caller budget and the exchange backstop.
 				refresh: (current, refreshSignal) =>
 					this.#requestOAuthCredentialRefresh(provider, current, credentialId, refreshSignal, reason, undefined),
-				isDefinitiveFailure: error => AIError.isDefinitiveOAuthFailure(String(error)),
+				// A usage probe is advisory: leave a dead grant for an interactive request to disable.
+				isDefinitiveFailure:
+					reason === "usage-probe" ? undefined : error => AIError.isDefinitiveOAuthFailure(String(error)),
 				disabledCause: error => `oauth refresh failed: ${String(error)}`,
 			});
 			if (result.credential) {

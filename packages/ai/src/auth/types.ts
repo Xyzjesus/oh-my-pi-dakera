@@ -329,8 +329,13 @@ export interface CredentialDisabledEvent {
 	orgName?: string;
 }
 
-/** Why a delegated OAuth refresh was requested. */
-export type OAuthRefreshReason = "auth-recovery";
+/**
+ * Why an OAuth refresh was requested.
+ * - `auth-recovery`: a provider rejected the bearer with a 401.
+ * - `usage-probe`: a background usage poll; advisory, so a definitive refresh
+ *   failure never disables the credential (an interactive request decides).
+ */
+export type OAuthRefreshReason = "auth-recovery" | "usage-probe";
 
 /** Configuration supplied when constructing credential storage. */
 export type AuthStorageOptions = {
