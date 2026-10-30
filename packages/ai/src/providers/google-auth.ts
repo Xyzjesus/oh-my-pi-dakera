@@ -69,10 +69,18 @@ interface TokenResponse {
 	access_token: string;
 	expires_in: number;
 	token_type?: string;
+	/** Replacement refresh token; STS may rotate workforce refresh tokens on exchange. */
+	refresh_token?: string;
 }
 
 const tokenCache = new Map<string, CachedToken>();
 const inflight = new Map<string, Promise<string>>();
+/**
+ * Latest workforce refresh token, keyed by the token stored in the ADC file. The file is never
+ * rewritten here when STS rotates the token, so later refreshes must use the replacement;
+ * a re-login writes a new file token and bypasses the stale entry.
+ */
+const rotatedRefreshTokens = new Map<string, string>();
 
 function getRefreshSkewMs(): number {
 	return $envpos("GOOGLE_VERTEX_REFRESH_SKEW_MS", 60_000);
@@ -184,9 +192,12 @@ async function exchangeWorkforceRefreshToken(
 	signal: AbortSignal | undefined,
 	fetchImpl: FetchImpl,
 ): Promise<TokenResponse> {
-	const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: creds.refresh_token });
+	const refreshToken = rotatedRefreshTokens.get(creds.refresh_token) ?? creds.refresh_token;
+	const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken });
 	const authorization = `Basic ${Buffer.from(`${creds.client_id}:${creds.client_secret}`, "utf8").toString("base64")}`;
-	return postForToken(creds.token_url, body, signal, fetchImpl, { Authorization: authorization });
+	const token = await postForToken(creds.token_url, body, signal, fetchImpl, { Authorization: authorization });
+	if (token.refresh_token) rotatedRefreshTokens.set(creds.refresh_token, token.refresh_token);
+	return token;
 }
 
 async function fetchMetadataToken(
@@ -366,4 +377,5 @@ export async function getVertexAccessToken(options?: { signal?: AbortSignal; fet
 export function __resetVertexTokenCache(): void {
 	tokenCache.clear();
 	inflight.clear();
+	rotatedRefreshTokens.clear();
 }

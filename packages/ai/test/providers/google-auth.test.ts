@@ -273,6 +273,38 @@ describe("Workforce Identity Federation ADC", () => {
 		);
 	});
 
+	it("uses a rotated refresh token returned by STS for the next refresh", async () => {
+		await Bun.write(
+			Bun.env.GOOGLE_APPLICATION_CREDENTIALS!,
+			JSON.stringify({
+				type: "external_account_authorized_user",
+				client_id: "workforce-client",
+				client_secret: "workforce-secret",
+				refresh_token: "file-refresh",
+				token_url: "https://sts.googleapis.com/v1/oauthtoken",
+			}),
+		);
+		const sentRefreshTokens: (string | null)[] = [];
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			const sent = new URLSearchParams(String(init?.body)).get("refresh_token");
+			sentRefreshTokens.push(sent);
+			if (sent === "file-refresh") {
+				// expires_in 0 forces the next call to refresh instead of reusing the cache.
+				return new Response(
+					JSON.stringify({ access_token: "first-access", expires_in: 0, refresh_token: "rotated-refresh" }),
+				);
+			}
+			if (sent === "rotated-refresh") {
+				return new Response(JSON.stringify({ access_token: "second-access", expires_in: 3600 }));
+			}
+			return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+		};
+
+		expect(await getVertexAccessToken({ fetch: fetchImpl })).toBe("first-access");
+		expect(await getVertexAccessToken({ fetch: fetchImpl })).toBe("second-access");
+		expect(sentRefreshTokens).toEqual(["file-refresh", "rotated-refresh"]);
+	});
+
 	it("rejects unknown ADC types before sending a token request", async () => {
 		await Bun.write(
 			Bun.env.GOOGLE_APPLICATION_CREDENTIALS!,
