@@ -11,7 +11,7 @@ import type {
 	Usage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { isRecord, parseJsonlLenient } from "@oh-my-pi/pi-utils";
+import { isRecord, parseJsonlLenient, sanitizeText } from "@oh-my-pi/pi-utils";
 import { resolveClaudePaths } from "../config/claude-paths";
 import { collectForeignJsonRecords, type ForeignJsonRecord, readForeignJsonRecords } from "./foreign-session-jsonl";
 import type { ForeignSessionInfo, ForeignSessionStore } from "./foreign-session-store";
@@ -73,8 +73,10 @@ async function readTitleSidecar(transcript: string, sessionId: string): Promise<
 	try {
 		const value: unknown = await Bun.file(path.join(path.dirname(transcript), sessionId, "custom-title.json")).json();
 		if (!isRecord(value)) return undefined;
+		// Strip ANSI/control characters and collapse whitespace so the picker row shows
+		// the same single-line name that setSessionName() will keep on import.
 		const title = stringField(value, "customTitle");
-		return title?.trim() ? title : undefined;
+		return title ? cleanPreview(sanitizeText(title)) : undefined;
 	} catch {
 		// Sidecars are optional; a missing or unreadable title must not hide the session.
 		return undefined;

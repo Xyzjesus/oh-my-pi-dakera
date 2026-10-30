@@ -213,6 +213,23 @@ describe("ClaudeSessionStore", () => {
 		expect(manager.titleSource).toBe("user");
 	});
 
+	it("sanitizes a sidecar title so the picker row and the imported name match", async () => {
+		const { info, store } = await createClaudeFixture();
+		// A pasted multi-line name with a tab and an ANSI colour sequence.
+		const raw = "Renamed\nsession\twith \x1b[31mcolour\x1b[0m  ";
+		await Bun.write(
+			path.join(path.dirname(info.path), info.id, "custom-title.json"),
+			JSON.stringify({ customTitle: raw }),
+		);
+
+		const listed = (await store.list()).find(item => item.id === info.id);
+		if (!listed) throw new Error("sidecar fixture was not listed");
+		expect(listed.title).toBe("Renamed session with colour");
+
+		const manager = await store.load(listed);
+		expect(manager.getSessionName()).toBe(listed.title);
+	});
+
 	it("reflects sidecar updates and removal when listing again", async () => {
 		const { info, store } = await createClaudeFixture();
 		const sidecar = path.join(path.dirname(info.path), info.id, "custom-title.json");
