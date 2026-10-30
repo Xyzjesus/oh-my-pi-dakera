@@ -520,9 +520,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		cwd: string | undefined;
 		name: string | undefined;
 	} {
-		const rawCommand = typeof input.command === "string" ? input.command : "";
+		if (input.command !== undefined && typeof input.command !== "string") {
+			throw new ToolError(`Invalid command: expected string, got ${typeof input.command}`);
+		}
+		if (input.cwd !== undefined && typeof input.cwd !== "string") {
+			throw new ToolError(`Invalid working directory: expected string, got ${typeof input.cwd}`);
+		}
+		if (input.name !== undefined && typeof input.name !== "string") {
+			throw new ToolError(`Invalid service name: expected string, got ${typeof input.name}`);
+		}
+		const rawCommand = input.command ?? "";
 		let command = rawCommand;
-		let cwd = typeof input.cwd === "string" ? input.cwd : undefined;
+		let cwd = input.cwd;
 		if (!cwd) {
 			const cd = extractLeadingCdTarget(command);
 			if (cd) {
@@ -543,23 +552,58 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		return [];
 	}
 
-	#interceptionRefusal(input: Partial<BashToolInput>, ctx?: AgentToolContext): string | undefined {
-		if (!cfgBashInterceptorEnabled.get(this.session.settings)) return undefined;
-		const { rawCommand, command, name } = this.#normalizeInput(input);
-		const rules = cfgBashInterceptorPatterns.get(this.session.settings).filter(rule => !name || rule.tool !== "bash");
-		const availableTools = this.#availableTools(rules, ctx ?? this.session.getToolContext?.());
-		const commandsToCheck = rawCommand === command ? [command] : [rawCommand, command];
-		for (const commandToCheck of commandsToCheck) {
-			const interception = checkBashInterception(commandToCheck, availableTools, rules, rawCommand);
-			if (interception.block && interception.message) {
-				return interception.message.replace(/^Blocked:\s*/u, "");
+	#refusalReason(input: Partial<BashToolInput>, ctx?: AgentToolContext): string | undefined {
+		const { rawCommand, command, cwd, name } = this.#normalizeInput(input);
+		const asyncRequested = input.async === true;
+		if (name !== undefined && !this.#launchEnabled) {
+			return "Service launch is disabled in this session.";
+		}
+		if (name === undefined && asyncRequested && !cfgAsyncEnabled.get(this.session.settings)) {
+			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
+		}
+
+		if (cfgBashInterceptorEnabled.get(this.session.settings)) {
+			const rules = cfgBashInterceptorPatterns
+				.get(this.session.settings)
+				.filter(rule => !name || rule.tool !== "bash");
+			const availableTools = this.#availableTools(rules, ctx ?? this.session.getToolContext?.());
+			const commandsToCheck = rawCommand === command ? [command] : [rawCommand, command];
+			for (const commandToCheck of commandsToCheck) {
+				const interception = checkBashInterception(commandToCheck, availableTools, rules, rawCommand);
+				if (interception.block && interception.message) {
+					return interception.message.replace(/^Blocked:\s*/u, "");
+				}
+			}
+		}
+
+		const router = InternalUrlRouter.instance();
+		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
+		if (virtualCwd !== undefined) {
+			if (
+				name !== undefined ||
+				canUseInteractiveBashPty(input.pty === true, ctx ?? this.session.getToolContext?.())
+			) {
+				return `Working directory ${virtualCwd} exists only in the embedded shell; ${name !== undefined ? "services" : "pty commands"} run external processes and need a host directory.`;
 			}
 		}
 		return undefined;
 	}
 
-	#interceptionDecision(input: Partial<BashToolInput>, ctx?: AgentToolContext): ToolApprovalDecision | undefined {
-		const refusal = this.#interceptionRefusal(input, ctx);
+	#refusalDecision(input: Partial<BashToolInput>, ctx?: AgentToolContext): ToolApprovalDecision | undefined {
+		let refusal: string | undefined;
+		try {
+			refusal = this.#refusalReason(input, ctx);
+		} catch (err) {
+			if (err instanceof ToolError) {
+				return {
+					tier: "exec",
+					override: true,
+					policy: "deny",
+					reason: err.message,
+				};
+			}
+			throw err;
+		}
 		if (refusal !== undefined) {
 			return {
 				tier: "exec",
@@ -626,8 +670,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				if (segmentRule?.approval === "prompt") promptRule ??= segmentRule;
 				if (!segmentRule) hasUnmatchedSegment = true;
 			}
-			const interception = this.#interceptionDecision(input, ctx);
-			if (interception) return interception;
+			const refusal = this.#refusalDecision(input, ctx);
+			if (refusal) return refusal;
 			if (promptRule) {
 				return {
 					tier: "exec",
@@ -646,8 +690,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			// Unmatched segments retain the standalone tool-policy and mode fallback.
 			return hasUnmatchedSegment ? "exec" : { tier: "write", policy: "allow" };
 		}
-		const interception = this.#interceptionDecision(input, ctx);
-		if (interception) return interception;
+		const refusal = this.#refusalDecision(input, ctx);
+		if (refusal) return refusal;
 		const criticalCommand = command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command));
 		if (criticalCommand) {
 			return { tier: "exec", override: true, reason: "Critical pattern detected" };
@@ -1103,25 +1147,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
 		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<BashToolDetails>> {
+		const refusal = this.#refusalReason(input, ctx);
+		if (refusal !== undefined) {
+			const isInterceptorMessage = refusal.startsWith("Use the `") || refusal.startsWith("Use `bash`");
+			throw new ToolError(isInterceptorMessage ? `Blocked: ${refusal}` : refusal);
+		}
 		const { rawCommand, command: normalizedCommand, cwd, name } = this.#normalizeInput(input);
 		let command = normalizedCommand;
 		const rawTimeout = input.timeout;
 		const rawReady = input.ready;
 		const asyncRequested = input.async === true;
 		const pty = input.pty;
-
-		if (name !== undefined) {
-			if (!this.#launchEnabled) throw new ToolError("Service launch is disabled in this session.");
-		}
-		if (name === undefined && asyncRequested && !cfgAsyncEnabled.get(this.session.settings)) {
-			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
-		}
-
-		const interception = this.#interceptionRefusal(input, ctx);
-		if (interception !== undefined) {
-			throw new ToolError(`Blocked: ${interception}`);
-		}
-
 		// The session this call belongs to, captured before any await: a session
 		// change while the call waits must not move it into the new session's
 		// shell, nor hand it the new session's identity.
