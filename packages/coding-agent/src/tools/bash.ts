@@ -514,7 +514,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	readonly name = "bash";
 	/** Bash reads `skill://` paths through its shell filesystem, including as a working directory. */
 	readonly readsSkillUris = true;
-	#normalizeInput(input: Partial<BashToolInput>): {
+	#normalizeInput(
+		input: Partial<BashToolInput>,
+		isExecute = false,
+	): {
 		rawCommand: string;
 		command: string;
 		cwd: string | undefined;
@@ -523,13 +526,16 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (input.command !== undefined && typeof input.command !== "string") {
 			throw new ToolError(`Invalid command: expected string, got ${typeof input.command}`);
 		}
+		if (isExecute && input.command === undefined) {
+			throw new ToolError("Missing required argument: command");
+		}
 		if (input.cwd !== undefined && typeof input.cwd !== "string") {
 			throw new ToolError(`Invalid working directory: expected string, got ${typeof input.cwd}`);
 		}
 		if (input.name !== undefined && typeof input.name !== "string") {
 			throw new ToolError(`Invalid service name: expected string, got ${typeof input.name}`);
 		}
-		const rawCommand = input.command ?? "";
+		const rawCommand = typeof input.command === "string" ? input.command : "";
 		let command = rawCommand;
 		let cwd = input.cwd;
 		if (!cwd) {
@@ -544,12 +550,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 
 	#availableTools(rules: readonly { tool: string }[], ctx?: AgentToolContext): string[] {
-		const contextTools = ctx?.toolNames ?? this.session.getToolContext?.()?.toolNames;
-		if (contextTools !== undefined) return contextTools;
-		if (this.session.isToolActive) {
-			return [...new Set(rules.map(rule => rule.tool))].filter(tool => this.session.isToolActive?.(tool) === true);
-		}
-		return [];
+		return ctx?.toolNames ?? [];
 	}
 
 	#refusalReason(input: Partial<BashToolInput>, ctx?: AgentToolContext): string | undefined {
@@ -566,7 +567,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			const rules = cfgBashInterceptorPatterns
 				.get(this.session.settings)
 				.filter(rule => !name || rule.tool !== "bash");
-			const availableTools = this.#availableTools(rules, ctx ?? this.session.getToolContext?.());
+			const availableTools = this.#availableTools(rules, ctx);
 			const commandsToCheck = rawCommand === command ? [command] : [rawCommand, command];
 			for (const commandToCheck of commandsToCheck) {
 				const interception = checkBashInterception(commandToCheck, availableTools, rules, rawCommand);
@@ -579,10 +580,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const router = InternalUrlRouter.instance();
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
 		if (virtualCwd !== undefined) {
-			if (
-				name !== undefined ||
-				canUseInteractiveBashPty(input.pty === true, ctx ?? this.session.getToolContext?.())
-			) {
+			if (name !== undefined || canUseInteractiveBashPty(input.pty === true, ctx)) {
 				return `Working directory ${virtualCwd} exists only in the embedded shell; ${name !== undefined ? "services" : "pty commands"} run external processes and need a host directory.`;
 			}
 		}
@@ -1152,7 +1150,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			const isInterceptorMessage = refusal.startsWith("Use the `") || refusal.startsWith("Use `bash`");
 			throw new ToolError(isInterceptorMessage ? `Blocked: ${refusal}` : refusal);
 		}
-		const { rawCommand, command: normalizedCommand, cwd, name } = this.#normalizeInput(input);
+		const { rawCommand, command: normalizedCommand, cwd, name } = this.#normalizeInput(input, true);
 		let command = normalizedCommand;
 		const rawTimeout = input.timeout;
 		const rawReady = input.ready;

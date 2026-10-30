@@ -7,7 +7,7 @@
  */
 import { afterAll, afterEach, beforeAll, expect, it, spyOn } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool, type AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModelOptions } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -353,7 +353,7 @@ it("rejects intercepted bash command before invoking ACP requestPermission", asy
 			{ command: "cat file.txt" },
 			undefined,
 			undefined as never,
-			undefined as never,
+			{ toolNames: ["read", "bash"] } as AgentToolContext,
 		),
 	).rejects.toThrow("Use the `read` tool instead of cat/head/tail");
 

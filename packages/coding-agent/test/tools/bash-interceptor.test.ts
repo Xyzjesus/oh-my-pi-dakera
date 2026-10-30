@@ -419,6 +419,7 @@ describe("pre-approval refusal gate", () => {
 
 	const alwaysAskCtx = {
 		settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+		toolNames: ["read", "grep", "bash"],
 	} as unknown as AgentToolContext;
 
 	it("rejects an intercepted command in always-ask mode without prompting", async () => {
@@ -452,6 +453,7 @@ describe("pre-approval refusal gate", () => {
 		await expect(
 			wrapper.execute("call-2", { command: "grep foo src/file.ts" }, undefined, undefined, {
 				settings: Settings.isolated({ "tools.approvalMode": "write" }),
+				toolNames: ["grep"],
 			} as unknown as AgentToolContext),
 		).rejects.toThrow("Use the `grep` tool instead of grep/rg");
 
@@ -515,6 +517,26 @@ describe("pre-approval refusal gate", () => {
 		).rejects.toThrow("Invalid working directory: expected string");
 
 		expect(select).not.toHaveBeenCalled();
+	});
+
+	it("rejects revised input that omits command on the execution path", async () => {
+		const tool = new BashTool(createSession());
+		await expect(tool.execute("call-missing-command", {} as BashToolInput)).rejects.toThrow(
+			"Missing required argument: command",
+		);
+	});
+
+	it("does not intercept when context toolNames omits the replacement tool (e.g. advisor with bash only)", async () => {
+		const select = vi.fn(async () => "Approve");
+		const wrapper = makeWrapper(new BashTool(createSession()), select);
+		const advisorCtx = {
+			settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+			toolNames: ["bash"],
+		} as unknown as AgentToolContext;
+
+		await wrapper.execute("call-advisor", { command: "cat package.json" }, undefined, undefined, advisorCtx);
+
+		expect(select).toHaveBeenCalledTimes(1);
 	});
 
 	it("catches extension tool_call input rewrites into an intercepted command before prompting", async () => {
