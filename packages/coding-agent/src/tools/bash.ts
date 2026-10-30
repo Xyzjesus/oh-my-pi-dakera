@@ -543,43 +543,23 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		return [];
 	}
 
-	#refusalReason(input: Partial<BashToolInput>, ctx?: AgentToolContext): string | undefined {
-		const { rawCommand, command, cwd, name } = this.#normalizeInput(input);
-		const asyncRequested = input.async === true;
-		if (name !== undefined && !this.#launchEnabled) {
-			return "Service launch is disabled in this session.";
-		}
-		if (name === undefined && asyncRequested && !cfgAsyncEnabled.get(this.session.settings)) {
-			return "Async bash execution is disabled. Enable async.enabled to use async mode.";
-		}
-
-		const effectiveCtx = ctx ?? this.session.getToolContext?.();
-		if (cfgBashInterceptorEnabled.get(this.session.settings)) {
-			const rules = cfgBashInterceptorPatterns
-				.get(this.session.settings)
-				.filter(rule => !name || rule.tool !== "bash");
-			const availableTools = this.#availableTools(rules, effectiveCtx);
-			const commandsToCheck = rawCommand === command ? [command] : [rawCommand, command];
-			for (const commandToCheck of commandsToCheck) {
-				const interception = checkBashInterception(commandToCheck, availableTools, rules, rawCommand);
-				if (interception.block) {
-					return interception.message ?? "Command blocked";
-				}
-			}
-		}
-
-		const router = InternalUrlRouter.instance();
-		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
-		if (virtualCwd !== undefined) {
-			if (name !== undefined || canUseInteractiveBashPty(input.pty === true, effectiveCtx)) {
-				return `Working directory ${virtualCwd} exists only in the embedded shell; ${name !== undefined ? "services" : "pty commands"} run external processes and need a host directory.`;
+	#interceptionRefusal(input: Partial<BashToolInput>, ctx?: AgentToolContext): string | undefined {
+		if (!cfgBashInterceptorEnabled.get(this.session.settings)) return undefined;
+		const { rawCommand, command, name } = this.#normalizeInput(input);
+		const rules = cfgBashInterceptorPatterns.get(this.session.settings).filter(rule => !name || rule.tool !== "bash");
+		const availableTools = this.#availableTools(rules, ctx ?? this.session.getToolContext?.());
+		const commandsToCheck = rawCommand === command ? [command] : [rawCommand, command];
+		for (const commandToCheck of commandsToCheck) {
+			const interception = checkBashInterception(commandToCheck, availableTools, rules, rawCommand);
+			if (interception.block && interception.message) {
+				return interception.message.replace(/^Blocked:\s*/u, "");
 			}
 		}
 		return undefined;
 	}
 
-	#refusalDecision(input: Partial<BashToolInput>): ToolApprovalDecision | undefined {
-		const refusal = this.#refusalReason(input);
+	#interceptionDecision(input: Partial<BashToolInput>): ToolApprovalDecision | undefined {
+		const refusal = this.#interceptionRefusal(input);
 		if (refusal !== undefined) {
 			return {
 				tier: "exec",
@@ -646,8 +626,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				if (segmentRule?.approval === "prompt") promptRule ??= segmentRule;
 				if (!segmentRule) hasUnmatchedSegment = true;
 			}
-			const refusal = this.#refusalDecision(input);
-			if (refusal) return refusal;
+			const interception = this.#interceptionDecision(input);
+			if (interception) return interception;
 			if (promptRule) {
 				return {
 					tier: "exec",
@@ -666,8 +646,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			// Unmatched segments retain the standalone tool-policy and mode fallback.
 			return hasUnmatchedSegment ? "exec" : { tier: "write", policy: "allow" };
 		}
-		const refusal = this.#refusalDecision(input);
-		if (refusal) return refusal;
+		const interception = this.#interceptionDecision(input);
+		if (interception) return interception;
 		const criticalCommand = command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command));
 		if (criticalCommand) {
 			return { tier: "exec", override: true, reason: "Critical pattern detected" };
@@ -1123,16 +1103,24 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
 		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<BashToolDetails>> {
-		const refusal = this.#refusalReason(input, ctx);
-		if (refusal !== undefined) {
-			throw new ToolError(refusal);
-		}
 		const { rawCommand, command: normalizedCommand, cwd, name } = this.#normalizeInput(input);
 		let command = normalizedCommand;
 		const rawTimeout = input.timeout;
 		const rawReady = input.ready;
-		const rawAsync = input.async;
+		const asyncRequested = input.async === true;
 		const pty = input.pty;
+
+		if (name !== undefined) {
+			if (!this.#launchEnabled) throw new ToolError("Service launch is disabled in this session.");
+		}
+		if (name === undefined && asyncRequested && !cfgAsyncEnabled.get(this.session.settings)) {
+			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
+		}
+
+		const interception = this.#interceptionRefusal(input, ctx);
+		if (interception !== undefined) {
+			throw new ToolError(`Blocked: ${interception}`);
+		}
 
 		// The session this call belongs to, captured before any await: a session
 		// change while the call waits must not move it into the new session's
@@ -1146,7 +1134,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// `name` is no service name, and service-only fields with nothing in
 		// them are not a service request.
 		const ready = normalizeReady(rawReady);
-		const asyncRequested = rawAsync === true;
 		const pendingNotices: string[] = [];
 		if (name !== undefined) {
 			if (rawTimeout !== undefined)
@@ -1180,6 +1167,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
 		const commandCwd = virtualCwd ?? (cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd);
 		if (virtualCwd !== undefined) {
+			if (name !== undefined || canUseInteractiveBashPty(pty === true, ctx)) {
+				throw new ToolError(
+					`Working directory ${virtualCwd} exists only in the embedded shell; ${name !== undefined ? "services" : "pty commands"} run external processes and need a host directory.`,
+				);
+			}
 			const cwdStat = await this.#urlFilesystem(signal, approvalTier)
 				.stat(virtualCwd)
 				.catch((err: unknown) => {

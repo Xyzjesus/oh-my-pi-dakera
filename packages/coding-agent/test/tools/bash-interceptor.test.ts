@@ -445,43 +445,28 @@ describe("pre-approval refusal gate", () => {
 		expect(select).not.toHaveBeenCalled();
 	});
 
-	it("rejects disabled service launch before prompting", async () => {
-		const select = vi.fn(async () => "Approve");
-		const wrapper = makeWrapper(new BashTool(createSession({ "launch.enabled": false })), select);
-
-		await expect(
-			wrapper.execute("call-3", { command: "npm start", name: "dev" }, undefined, undefined, alwaysAskCtx),
-		).rejects.toThrow("Service launch is disabled in this session");
-
-		expect(select).not.toHaveBeenCalled();
+	it("rejects disabled service launch with an explicit argument error", async () => {
+		const tool = new BashTool(createSession({ "launch.enabled": false }));
+		await expect(tool.execute("call-3", { command: "npm start", name: "dev" })).rejects.toThrow(
+			"Service launch is disabled in this session",
+		);
 	});
 
-	it("rejects disabled async mode before prompting", async () => {
-		const select = vi.fn(async () => "Approve");
-		const wrapper = makeWrapper(new BashTool(createSession({ "async.enabled": false })), select);
-
-		await expect(
-			wrapper.execute("call-4", { command: "sleep 10", async: true }, undefined, undefined, alwaysAskCtx),
-		).rejects.toThrow("Async bash execution is disabled");
-
-		expect(select).not.toHaveBeenCalled();
+	it("rejects disabled async mode with an explicit argument error", async () => {
+		const tool = new BashTool(createSession({ "async.enabled": false }));
+		await expect(tool.execute("call-4", { command: "sleep 10", async: true })).rejects.toThrow(
+			"Async bash execution is disabled",
+		);
 	});
 
-	it("rejects virtual working directory with pty before prompting", async () => {
-		const select = vi.fn(async () => "Approve");
-		const wrapper = makeWrapper(new BashTool(createSession()), select);
-
+	it("rejects virtual working directory with pty with an explicit argument error", async () => {
+		const tool = new BashTool(createSession());
 		await expect(
-			wrapper.execute(
-				"call-5",
-				{ command: "echo ok", cwd: "local://work", pty: true },
-				undefined,
-				undefined,
-				alwaysAskCtx,
-			),
+			tool.execute("call-5", { command: "echo ok", cwd: "local://work", pty: true }, undefined, undefined, {
+				hasUI: true,
+				ui: {},
+			} as AgentToolContext),
 		).rejects.toThrow("exists only in the embedded shell; pty commands run external processes");
-
-		expect(select).not.toHaveBeenCalled();
 	});
 
 	it("catches extension tool_call input rewrites into an intercepted command before prompting", async () => {
