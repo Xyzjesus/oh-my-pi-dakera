@@ -578,6 +578,19 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		return undefined;
 	}
 
+	#refusalDecision(input: Partial<BashToolInput>): ToolApprovalDecision | undefined {
+		const refusal = this.#refusalReason(input);
+		if (refusal !== undefined) {
+			return {
+				tier: "exec",
+				override: true,
+				policy: "deny",
+				reason: refusal,
+			};
+		}
+		return undefined;
+	}
+
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const input =
 			args !== null && typeof args === "object" && !Array.isArray(args) ? (args as Partial<BashToolInput>) : {};
@@ -633,15 +646,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				if (segmentRule?.approval === "prompt") promptRule ??= segmentRule;
 				if (!segmentRule) hasUnmatchedSegment = true;
 			}
-			const refusal = this.#refusalReason(input);
-			if (refusal !== undefined) {
-				return {
-					tier: "exec",
-					override: true,
-					policy: "deny",
-					reason: refusal,
-				};
-			}
+			const refusal = this.#refusalDecision(input);
+			if (refusal) return refusal;
 			if (promptRule) {
 				return {
 					tier: "exec",
@@ -660,15 +666,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			// Unmatched segments retain the standalone tool-policy and mode fallback.
 			return hasUnmatchedSegment ? "exec" : { tier: "write", policy: "allow" };
 		}
-		const refusal = this.#refusalReason(input);
-		if (refusal !== undefined) {
-			return {
-				tier: "exec",
-				override: true,
-				policy: "deny",
-				reason: refusal,
-			};
-		}
+		const refusal = this.#refusalDecision(input);
+		if (refusal) return refusal;
 		const criticalCommand = command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command));
 		if (criticalCommand) {
 			return { tier: "exec", override: true, reason: "Critical pattern detected" };

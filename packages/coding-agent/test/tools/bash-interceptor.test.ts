@@ -383,94 +383,96 @@ describe("BashTool argument validation", () => {
 			"Async bash execution is disabled",
 		);
 	});
+});
 
-	it("denies intercepted commands and invalid options at the approval gate without prompting", async () => {
+describe("pre-approval refusal gate", () => {
+	const createSession = (settingsOverrides: Record<string, unknown> = {}, toolNames = ["read", "grep", "bash"]) =>
+		({
+			cwd: process.cwd(),
+			hasUI: true,
+			getSessionFile: () => null,
+			isToolActive: (name: string) => toolNames.includes(name),
+			getToolContext: () => ({ toolNames, hasUI: true, ui: {} }) as unknown as AgentToolContext,
+			settings: Settings.isolated({
+				"async.enabled": true,
+				"launch.enabled": true,
+				"bashInterceptor.enabled": true,
+				"bashInterceptor.patterns": DEFAULT_BASH_INTERCEPTOR_RULES,
+				...settingsOverrides,
+			}),
+		}) as unknown as ToolSession;
+
+	const makeWrapper = (tool: BashTool, select: () => Promise<string>, hasUI = true, rewrittenCommand?: string) => {
+		const runner = {
+			hasHandlers: (event: string) => rewrittenCommand !== undefined && event === "tool_call",
+			emitToolCall: async () => (rewrittenCommand ? { input: { command: rewrittenCommand } } : undefined),
+			consumeToolCallEmitted: () => false,
+			hasUI: () => hasUI,
+			getUIContext: () => ({ select }),
+			hasSessionApproval: () => false,
+			sessionId: "bash-approval-test",
+			cwd: process.cwd(),
+			runScoped: <T>(fn: () => T): T => fn(),
+		} as unknown as ExtensionRunner;
+		return new ExtensionToolWrapper(tool as Tool, runner);
+	};
+
+	const alwaysAskCtx = {
+		settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+	} as unknown as AgentToolContext;
+
+	it("rejects an intercepted command in always-ask mode without prompting", async () => {
 		const select = vi.fn(async () => "Approve");
-		const createSession = (settingsOverrides: Record<string, unknown> = {}, toolNames = ["read", "grep", "bash"]) =>
-			({
-				cwd: process.cwd(),
-				hasUI: true,
-				getSessionFile: () => null,
-				isToolActive: (name: string) => toolNames.includes(name),
-				getToolContext: () => ({ toolNames, hasUI: true, ui: {} }) as unknown as AgentToolContext,
-				settings: Settings.isolated({
-					"async.enabled": true,
-					"launch.enabled": true,
-					"bashInterceptor.enabled": true,
-					"bashInterceptor.patterns": DEFAULT_BASH_INTERCEPTOR_RULES,
-					...settingsOverrides,
-				}),
-			}) as unknown as ToolSession;
+		const wrapper = makeWrapper(new BashTool(createSession()), select);
 
-		const makeWrapper = (tool: BashTool, hasUI = true, rewrittenCommand?: string) => {
-			const runner = {
-				hasHandlers: (event: string) => rewrittenCommand !== undefined && event === "tool_call",
-				emitToolCall: async () => (rewrittenCommand ? { input: { command: rewrittenCommand } } : undefined),
-				consumeToolCallEmitted: () => false,
-				hasUI: () => hasUI,
-				getUIContext: () => ({ select }),
-				hasSessionApproval: () => false,
-				sessionId: "bash-approval-test",
-				cwd: process.cwd(),
-				runScoped: <T>(fn: () => T): T => fn(),
-			} as unknown as ExtensionRunner;
-			return new ExtensionToolWrapper(tool as Tool, runner);
-		};
-
-		const alwaysAskCtx = {
-			settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
-		} as unknown as AgentToolContext;
-
-		// 1. Intercepted command in always-ask mode rejects before prompting
 		await expect(
-			makeWrapper(new BashTool(createSession())).execute(
-				"call-1",
-				{ command: "cat package.json" },
-				undefined,
-				undefined,
-				alwaysAskCtx,
-			),
+			wrapper.execute("call-1", { command: "cat package.json" }, undefined, undefined, alwaysAskCtx),
 		).rejects.toThrow("Use the `read` tool instead of cat/head/tail");
-		expect(select).not.toHaveBeenCalled();
 
-		// 2. Headless write mode without UI returns the interceptor redirect error instead of missing UI error
+		expect(select).not.toHaveBeenCalled();
+	});
+
+	it("returns tool-redirect error in headless write mode without prompting or failing with missing-UI error", async () => {
+		const select = vi.fn(async () => "Approve");
+		const wrapper = makeWrapper(new BashTool(createSession()), select, false);
+
 		await expect(
-			makeWrapper(new BashTool(createSession()), false).execute(
-				"call-2",
-				{ command: "grep foo src/file.ts" },
-				undefined,
-				undefined,
-				{ settings: Settings.isolated({ "tools.approvalMode": "write" }) } as unknown as AgentToolContext,
-			),
+			wrapper.execute("call-2", { command: "grep foo src/file.ts" }, undefined, undefined, {
+				settings: Settings.isolated({ "tools.approvalMode": "write" }),
+			} as unknown as AgentToolContext),
 		).rejects.toThrow("Use the `grep` tool instead of grep/rg");
 
-		// 3. Disabled service launch rejects before prompting
+		expect(select).not.toHaveBeenCalled();
+	});
+
+	it("rejects disabled service launch before prompting", async () => {
+		const select = vi.fn(async () => "Approve");
+		const wrapper = makeWrapper(new BashTool(createSession({ "launch.enabled": false })), select);
+
 		await expect(
-			makeWrapper(new BashTool(createSession({ "launch.enabled": false }))).execute(
-				"call-3",
-				{ command: "npm start", name: "dev" },
-				undefined,
-				undefined,
-				alwaysAskCtx,
-			),
+			wrapper.execute("call-3", { command: "npm start", name: "dev" }, undefined, undefined, alwaysAskCtx),
 		).rejects.toThrow("Service launch is disabled in this session");
-		expect(select).not.toHaveBeenCalled();
 
-		// 4. Disabled async mode rejects before prompting
+		expect(select).not.toHaveBeenCalled();
+	});
+
+	it("rejects disabled async mode before prompting", async () => {
+		const select = vi.fn(async () => "Approve");
+		const wrapper = makeWrapper(new BashTool(createSession({ "async.enabled": false })), select);
+
 		await expect(
-			makeWrapper(new BashTool(createSession({ "async.enabled": false }))).execute(
-				"call-4",
-				{ command: "sleep 10", async: true },
-				undefined,
-				undefined,
-				alwaysAskCtx,
-			),
+			wrapper.execute("call-4", { command: "sleep 10", async: true }, undefined, undefined, alwaysAskCtx),
 		).rejects.toThrow("Async bash execution is disabled");
-		expect(select).not.toHaveBeenCalled();
 
-		// 5. Virtual working directory with pty rejects before prompting
+		expect(select).not.toHaveBeenCalled();
+	});
+
+	it("rejects virtual working directory with pty before prompting", async () => {
+		const select = vi.fn(async () => "Approve");
+		const wrapper = makeWrapper(new BashTool(createSession()), select);
+
 		await expect(
-			makeWrapper(new BashTool(createSession())).execute(
+			wrapper.execute(
 				"call-5",
 				{ command: "echo ok", cwd: "local://work", pty: true },
 				undefined,
@@ -478,18 +480,18 @@ describe("BashTool argument validation", () => {
 				alwaysAskCtx,
 			),
 		).rejects.toThrow("exists only in the embedded shell; pty commands run external processes");
-		expect(select).not.toHaveBeenCalled();
 
-		// 6. Extension tool_call rewrite into an intercepted command rejects before prompting
+		expect(select).not.toHaveBeenCalled();
+	});
+
+	it("catches extension tool_call input rewrites into an intercepted command before prompting", async () => {
+		const select = vi.fn(async () => "Approve");
+		const wrapper = makeWrapper(new BashTool(createSession()), select, true, "cat file.txt");
+
 		await expect(
-			makeWrapper(new BashTool(createSession()), true, "cat file.txt").execute(
-				"call-6",
-				{ command: "echo ok" },
-				undefined,
-				undefined,
-				alwaysAskCtx,
-			),
+			wrapper.execute("call-6", { command: "echo ok" }, undefined, undefined, alwaysAskCtx),
 		).rejects.toThrow("Use the `read` tool instead of cat/head/tail");
+
 		expect(select).not.toHaveBeenCalled();
 	});
 });
