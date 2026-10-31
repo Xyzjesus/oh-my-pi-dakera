@@ -4161,20 +4161,25 @@ export class SessionMaintenance {
 			preserveData: args.preserveData,
 			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
 		};
-		const rebuilt = buildSessionContext([...branch, pending], undefined, undefined, {
+		const projected = [...branch, pending];
+		const rebuilt = buildSessionContext(projected, undefined, undefined, {
 			maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model),
 		});
-		return nonMessageTokens + this.#countProjectedMessages(rebuilt.messages);
+		return nonMessageTokens + this.#countProjectedMessages(rebuilt.messages, projected);
 	}
 
 	/**
 	 * Count a rebuilt context the way {@link #estimateStoredContextTokens} will once it is committed:
 	 * a summary carrying frames is counted as itself so each frame gets the active model's frame
-	 * price, and an archive as the active model reads it ({@link #messagesAsRead}). Native Responses
+	 * price, and an archive as the active model reads it ({@link #messagesAsRead}), found among
+	 * `entries` (the projected branch when the compaction is not committed yet). Native Responses
 	 * history replaces the display summary and excludes opaque ciphertext.
 	 */
-	#countProjectedMessages(rebuilt: AgentMessage[]): number {
-		const messages = this.#messagesAsRead(rebuilt, this.#host.sessionManager.getBranchView());
+	#countProjectedMessages(
+		rebuilt: AgentMessage[],
+		entries: readonly SessionEntry[] = this.#host.sessionManager.getBranchView(),
+	): number {
+		const messages = this.#messagesAsRead(rebuilt, entries);
 		const options = { excludeEncryptedReasoning: true } as const;
 		const archives: AgentMessage[] = [];
 		const rest: AgentMessage[] = [];

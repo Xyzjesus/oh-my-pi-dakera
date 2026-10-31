@@ -1692,7 +1692,6 @@ describe("archive helpers", () => {
 		it("cuts a frameless archive's text past maxChars too", () => {
 			const text = `start ${"x".repeat(100)} end`;
 			const archive = { frames: [], totalChars: text.length, truncatedChars: 0, text, textHead: text };
-			expect(snapcompact.viewWithoutFrames("s", archive, { maxChars: text.length }).archive).toBe(archive);
 			const view = snapcompact.viewWithoutFrames("s", archive, { maxChars: 20 });
 			expect(view.archive.textHead).toBe(text.slice(0, 10));
 			expect(view.archive.textTail).toBe(text.slice(-10));

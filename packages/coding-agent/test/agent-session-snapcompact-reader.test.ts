@@ -20,12 +20,15 @@ import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock"
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
@@ -469,6 +472,74 @@ describe("snapcompact archive read by another model", () => {
 		const { text, images } = requestContent(mock.calls[0]?.context.messages);
 		expect(images).toEqual([]);
 		expect(text).toContain(marker);
+	});
+
+	it("prices an extension's archive as the text a model without image input will read", async () => {
+		const sessionManager = SessionManager.inMemory();
+		for (let i = 0; i < 4; i++) {
+			sessionManager.appendMessage({ role: "user", content: `turn ${i}`, timestamp: Date.now() });
+			sessionManager.appendMessage(assistant(deepseek, [{ type: "text", text: `reply ${i}` }]));
+		}
+		const archive = await snapcompact.compact(
+			{
+				firstKeptEntryId: sessionManager.getBranch().at(-1)!.id,
+				messagesToSummarize: archivedTurns(),
+				turnPrefixMessages: [],
+				tokensBefore: 100_000,
+				fileOps: snapcompact.createFileOps(),
+			},
+			{ model: gpt },
+		);
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_before_compact", async event => ({
+					compaction: {
+						summary: archive.summary,
+						shortSummary: archive.shortSummary,
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+						details: archive.details,
+						preserveData: archive.preserveData,
+					},
+				}));
+			},
+			tempDir,
+			new EventBus(),
+			runtime,
+			"snapcompact-reader-extension-archive",
+		);
+		const small: Model = { ...deepseek, contextWindow: 20_000 };
+		const mock = createMockModel({ handler: { content: ["ok"] } });
+		const agent = new Agent({
+			initialState: {
+				model: small,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: sessionManager.buildSessionContext().messages,
+			},
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.keepRecentTokens": 1 }),
+			modelRegistry,
+			extensionRunner: new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry),
+		});
+		sessions.push(session);
+
+		await session.compact();
+		const entry = latestCompaction(sessionManager);
+		expect(entry.method).toBeUndefined();
+		await session.prompt("Continue.");
+
+		// The model reads the archive's capped text, and tokensAfter prices that text, not the frames.
+		const { text, images } = requestContent(mock.calls[0]?.context.messages);
+		expect(images).toEqual([]);
+		const read = session.agent.tokenizer.countTokens(text);
+		expect(entry.tokensAfter).toBeLessThan(read * 1.2);
 	});
 
 	it("keeps both ends of an archive's text that would crowd a small window, and all of it in a large one", async () => {
