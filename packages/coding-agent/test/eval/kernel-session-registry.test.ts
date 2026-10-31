@@ -494,24 +494,19 @@ describe("kernel restart notice claim", () => {
 	 * Registry whose cells report whether their start claimed a restart notice.
 	 * A cell named in `failBeforeStart` throws before it starts (as a failing
 	 * prelude does); one in `failAfterStart` claims, then throws. A cell with a
-	 * gate in `holdBeforeStart` or `holdAfterStart` waits on it before or after it
-	 * starts; `onStart` hears each start.
+	 * gate in `holdBeforeStart` waits on it before it starts.
 	 */
 	function claimingRegistry(options?: {
 		unconfirmedShutdown?: boolean;
 		failBeforeStart?: string[];
 		failAfterStart?: string[];
 		holdBeforeStart?: Record<string, Promise<void>>;
-		holdAfterStart?: Record<string, Promise<void>>;
-		onStart?: (code: string) => void;
 	}) {
 		const { kernels, registry } = createFakeRegistry(
 			async (_kernel, code, runOptions) => {
 				await options?.holdBeforeStart?.[code];
 				if (options?.failBeforeStart?.includes(code)) throw new Error(`${code}: prelude failed`);
 				const restarted = runOptions.claimKernelRestartNotice?.() ?? false;
-				options?.onStart?.(code);
-				await options?.holdAfterStart?.[code];
 				if (options?.failAfterStart?.includes(code)) throw new Error(`${code}: failed after start`);
 				return { cancelled: false, value: restarted ? "notice" : "none" };
 			},
@@ -556,14 +551,13 @@ describe("kernel restart notice claim", () => {
 		}
 	});
 
-	it("hands back the notice when the cell that claimed it throws and no other cell has started", async () => {
+	it("does not hand the notice back when the cell that claimed it throws after it starts", async () => {
 		const { kernels, registry, cell } = claimingRegistry({ failAfterStart: ["throws"] });
 		try {
 			expect(await cell("first")).toBe("none");
 			kernels[0]!.alive = false;
 			await expect(cell("throws")).rejects.toThrow("failed after start");
-			expect(await cell("next")).toBe("notice");
-			expect(await cell("after notice")).toBe("none");
+			expect(await cell("next")).toBe("none");
 		} finally {
 			await registry.disposeAll();
 		}
@@ -596,34 +590,6 @@ describe("kernel restart notice claim", () => {
 			}
 		});
 	}
-
-	it("keeps the notice consumed when the cell that claimed it throws after a sibling has started", async () => {
-		const release = Promise.withResolvers<void>();
-		const claimerStarted = Promise.withResolvers<void>();
-		const { kernels, registry, cell } = claimingRegistry({
-			holdAfterStart: { claimer: release.promise },
-			failAfterStart: ["claimer"],
-			onStart: code => {
-				if (code === "claimer") claimerStarted.resolve();
-			},
-		});
-		try {
-			expect(await cell("first")).toBe("none");
-			kernels[0]!.alive = false;
-			const claimer = cell("claimer").then(
-				value => value,
-				(error: unknown) => String(error),
-			);
-			await claimerStarted.promise;
-			expect(await cell("sibling")).toBe("none");
-			release.resolve();
-			expect(await claimer).toBe("Error: claimer: failed after start");
-			expect(await cell("after")).toBe("none");
-		} finally {
-			release.resolve();
-			await registry.disposeAll();
-		}
-	});
 
 	it("does not give the notice to the cell after a reset", async () => {
 		const { kernels, registry, cell } = claimingRegistry();

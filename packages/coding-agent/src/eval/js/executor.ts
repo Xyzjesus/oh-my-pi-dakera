@@ -207,6 +207,16 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			displayOutputs,
 		};
 	} catch (error) {
+		// The result returns what the sink stored, a restart notice first, even
+		// when the output consumer also throws on the error text: the sink stores
+		// each chunk before handing it to the consumer.
+		const pushStored = (text: string): void => {
+			try {
+				outputSink.push(text);
+			} catch {
+				// Only the consumer misses the text; the result below still carries it.
+			}
+		};
 		const activeSignal = packageWorkComplete ? signal : packageSignal;
 		if (activeSignal?.aborted || isAbortError(error)) {
 			const timedOut = packageWorkComplete
@@ -218,7 +228,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 					: packageWorkComplete
 						? "Command timed out before JavaScript execution began. Any existing retained JS worker remains available."
 						: formatPackageInstallTimeoutAnnotation(packageTimeoutSignal?.aborted === true);
-				outputSink.push(annotation);
+				pushStored(annotation);
 			}
 			const summary = await outputSink.dump();
 			return {
@@ -237,7 +247,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			};
 		}
 		const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
-		outputSink.push(message);
+		pushStored(message);
 		const summary = await outputSink.dump();
 		return {
 			output: summary.output,

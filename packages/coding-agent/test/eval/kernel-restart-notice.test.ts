@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
-import { disposeAllKernelSessions } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
+import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { getEvalState } from "@oh-my-pi/pi-coding-agent/eval/state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
@@ -102,6 +103,39 @@ const SET_VALUE: Record<Language, string> = {
 const READ_VALUE: Record<Language, string> = {
 	py: "print(restart_probe + 1)",
 	js: "print(restartProbe + 1)",
+};
+
+/**
+ * Runs one cell through the language executor with a caller-supplied output
+ * consumer, which is how a consumer that fails is injected. A rejection becomes
+ * an error cell carrying the error text.
+ */
+async function runWithConsumer(
+	session: ToolSession,
+	language: Language,
+	code: string,
+	onChunk?: (chunk: string) => void,
+): Promise<Cell> {
+	const sessionId = session.getEvalSessionId?.() ?? "missing";
+	const execution =
+		language === "py"
+			? executePython(code, { cwd: session.cwd, sessionId, toolSession: session, onChunk, timeoutMs: 60_000 })
+			: executeJs(code, { cwd: session.cwd, sessionId, session, onChunk, timeoutMs: 60_000 });
+	return await execution.then(
+		result => ({ text: result.output, isError: result.exitCode !== 0 }),
+		(error: unknown) => ({ text: String(error), isError: true }),
+	);
+}
+
+/** Defines state, then ends on a carriage return so the executor's final flush emits a lone newline. */
+const DEFINE_THEN_FLUSH: Record<Language, string> = {
+	py: "import math\nsurvives = 42\ndef saved_fn(): return 43\nprint('defined')\nprint('\\r', end='')",
+	js: "var survives = 42; var savedFn = () => 43; print('defined'); void process.stdout.write('\\r');",
+};
+
+const USE_DEFINED: Record<Language, string> = {
+	py: "print('survived', survives, math.sqrt(4), saved_fn())",
+	js: "print('survived', survives, Math.sqrt(4), savedFn())",
 };
 
 describe("eval kernel restart notice", () => {
@@ -232,4 +266,77 @@ describe("eval kernel restart notice", () => {
 		expect(after.text).toContain(`survived 42 2.0 43 ${pidOf(sibling)}`);
 		expectNoNotice(after);
 	}, 120_000);
+});
+
+describe("eval kernel restart notice when output delivery fails", () => {
+	afterEach(async () => {
+		await Promise.all([disposeAllVmContexts(), disposeAllKernelSessions()]);
+	});
+
+	for (const language of ["py", "js"] as const) {
+		it(`${language}: a cell whose final output flush fails keeps the notice, and the next cell gets none`, async () => {
+			const session = makeSession(`restart-notice-flush-${language}-${crypto.randomUUID()}`);
+			const first = await runWithConsumer(session, language, PID_CELL[language]);
+			await killRuntime(session, language, pidOf(first));
+
+			let failures = 0;
+			const failed = await runWithConsumer(session, language, DEFINE_THEN_FLUSH[language], chunk => {
+				if (chunk !== "\n") return;
+				failures += 1;
+				throw new Error("output delivery failed during final flush");
+			});
+			const after = await runWithConsumer(session, language, USE_DEFINED[language]);
+
+			// The failed cell ran on the replacement: its definitions survive, and nothing re-announces the loss.
+			expect(failures).toBe(1);
+			expect(after.text).toMatch(/survived 42 2(?:\.0)? 43/);
+			expectNoNotice(after);
+			// The loss was announced once, by the failed cell, which returns the notice with its error.
+			expectNotice(failed, language);
+			expect(failed.isError).toBe(true);
+			expect(failed.text).toContain("output delivery failed during final flush");
+		}, 120_000);
+
+		it(`${language}: when overlapping cells' consumers refuse the notice, the cell that claimed it still returns it`, async () => {
+			const session = makeSession(`restart-notice-refused-${language}-${crypto.randomUUID()}`);
+			const first = await runWithConsumer(session, language, PID_CELL[language]);
+			await killRuntime(session, language, pidOf(first));
+
+			// Every cell's consumer refuses the notice, so whichever cell claims it is refused.
+			let refusals = 0;
+			const refuseNotice = (chunk: string): void => {
+				if (!chunk.includes("Kernel restarted:")) return;
+				refusals += 1;
+				throw new Error("notice delivery refused");
+			};
+			const cells = await Promise.all(
+				["one", "two", "three"].map(name => runWithConsumer(session, language, `print('${name}')`, refuseNotice)),
+			);
+			const after = await runWithConsumer(session, language, PID_CELL[language]);
+
+			const announced = cells.filter(cell => cell.text.includes("Kernel restarted:"));
+			expect(announced).toHaveLength(1);
+			expectNotice(announced[0]!, language);
+			expect(announced[0]!.isError).toBe(true);
+			expect(announced[0]!.text).toContain("notice delivery refused");
+			expect(refusals).toBe(1);
+			expectNoNotice(after);
+		}, 120_000);
+
+		it(`${language}: a cell whose consumer throws on every chunk still returns the notice`, async () => {
+			const session = makeSession(`restart-notice-broken-${language}-${crypto.randomUUID()}`);
+			const first = await runWithConsumer(session, language, PID_CELL[language]);
+			await killRuntime(session, language, pidOf(first));
+
+			const failed = await runWithConsumer(session, language, "print('unreached')", () => {
+				throw new Error("consumer is broken");
+			});
+			const after = await runWithConsumer(session, language, PID_CELL[language]);
+
+			expectNotice(failed, language);
+			expect(failed.isError).toBe(true);
+			expect(failed.text).toContain("consumer is broken");
+			expectNoNotice(after);
+		}, 120_000);
+	}
 });

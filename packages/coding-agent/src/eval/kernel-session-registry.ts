@@ -142,15 +142,14 @@ export function createKernelSessionRegistry<
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
 	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
-	// The kernel each session record's caller has seen: the one the latest cell
-	// started on. A cell that starts on a different live kernel runs on a
-	// replacement for one that died in between, and carries the notice. A cell
-	// that fails before it starts (prelude setup, cancellation) claims nothing, so
-	// the notice goes to the first cell that does start. Reset and disposal make a
-	// new record, so they never look like a restart. Each start stores a fresh
-	// entry, so its identity tells a failed cell whether another cell has started
-	// on the kernel since.
-	const servedKernels = new WeakMap<TSession, { kernel: TKernel }>();
+	// The kernel each session record's latest cell started on. A cell that starts
+	// on a different live kernel runs on a replacement for one that died in
+	// between and carries the notice; the executor keeps it in that cell's result
+	// even when the cell fails, so it is never handed back. A cell that fails
+	// before it starts (prelude setup, cancellation) claims nothing, so the notice
+	// goes to the first cell that does start. Reset and disposal make a new
+	// record, so they never look like a restart.
+	const servedKernels = new WeakMap<TSession, TKernel>();
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
 		sessions,
@@ -466,24 +465,16 @@ export function createKernelSessionRegistry<
 		const kernel = await acquireLiveSessionKernel(session, cwd, options);
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
 		throwIfCallerCancelled(options);
-		const claim: { previous?: { kernel: TKernel }; entry?: { kernel: TKernel } } = {};
 		const claimKernelRestartNotice = (): boolean => {
-			claim.previous = servedKernels.get(session);
-			claim.entry = { kernel };
-			servedKernels.set(session, claim.entry);
-			return claim.previous !== undefined && claim.previous.kernel !== kernel;
+			const previous = servedKernels.get(session);
+			servedKernels.set(session, kernel);
+			return previous !== undefined && previous !== kernel;
 		};
 		const runOptions = { ...options, cwd, claimKernelRestartNotice };
 		let result: R;
 		try {
 			result = await descriptor.executeWithKernel(kernel, code, runOptions);
 		} catch (err) {
-			// A thrown cell returns no output, so a notice it claimed never reached the
-			// caller. Hand it back only if no other cell has started on this kernel since.
-			const { previous, entry } = claim;
-			if (previous && previous.kernel !== kernel && entry && servedKernels.get(session) === entry) {
-				servedKernels.set(session, previous);
-			}
 			if (
 				descriptor.isCancellation?.(err) ||
 				isCancellationError(err, descriptor.cancelledErrorClass) ||
