@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `bun check` now runs the Rust half when your branch commits a Rust change on a clean tree, skips it on a TypeScript-only branch even under `CI=true`, and prints one line saying which it did and why (`OMP_FORCE_RUST_TASKS=1` always runs it)
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

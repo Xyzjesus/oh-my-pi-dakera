@@ -219,8 +219,9 @@ function workspaceTestCommand(pkg: string, parallel: number, options: { extraArg
 
 // The Rust suite as one pooled command, so root `bun run test` reports TS and
 // Rust under the same progress stream / failure report. Delegates to
-// run-rs-task.ts, which self-skips when no Rust-affecting files changed locally
-// (printing a one-line notice) and resolves the cargo/nextest invocation.
+// run-rs-task.ts, which self-skips when the branch changed no Rust-affecting file
+// since its merge base with main, committed or not (printing a one-line notice),
+// and resolves the cargo/nextest invocation.
 function rustTestCommand(): TestCommand {
 	return {
 		label: "rust (cargo nextest; skipped if no Rust changes)",
