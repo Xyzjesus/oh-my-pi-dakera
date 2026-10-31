@@ -8,6 +8,7 @@ interface TestOptions {
 	reset?: boolean;
 	signal?: AbortSignal;
 	deadlineMs?: number;
+	kernelRestarted?: boolean;
 }
 
 interface TestResult {
@@ -486,4 +487,85 @@ describe("kernel session recovery", () => {
 			await registry.disposeAll();
 		}
 	});
+});
+
+describe("kernel restart flag", () => {
+	/**
+	 * Registry whose cells report whether the registry flagged them as running on a
+	 * restarted kernel; `flag` runs one cell in the shared test session.
+	 */
+	function flaggingRegistry(options?: { unconfirmedShutdown?: boolean; throwOn?: string }) {
+		const { kernels, registry } = createFakeRegistry(
+			async (_kernel, code, runOptions) => {
+				if (code === options?.throwOn) throw new Error("prelude sync failed");
+				return { cancelled: false, value: runOptions.kernelRestarted ? "restarted" : "same" };
+			},
+			async kernel => {
+				if (!options?.unconfirmedShutdown) return;
+				kernel.shutdown = async () => {
+					kernel.alive = false;
+					kernel.shutdowns += 1;
+					return { confirmed: false };
+				};
+			},
+		);
+		const flag = async (code: string, extra?: Partial<TestOptions>): Promise<string> =>
+			(await registry.executeOnSession(code, "/tmp", { sessionId: "flagged", ...extra })).value;
+		return { kernels, registry, flag };
+	}
+
+	it("flags only the first cell on a replacement for a kernel that died between cells", async () => {
+		const { kernels, registry, flag } = flaggingRegistry();
+		try {
+			expect(await flag("first")).toBe("same");
+			expect(await flag("second")).toBe("same");
+			kernels[0]!.alive = false;
+			expect(await flag("after death")).toBe("restarted");
+			expect(await flag("after notice")).toBe("same");
+			expect(kernels).toHaveLength(2);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("keeps the flag for the next cell when the flagged cell throws before returning output", async () => {
+		const { kernels, registry, flag } = flaggingRegistry({ throwOn: "throws" });
+		try {
+			expect(await flag("first")).toBe("same");
+			kernels[0]!.alive = false;
+			await expect(flag("throws")).rejects.toThrow("prelude sync failed");
+			expect(await flag("next")).toBe("restarted");
+			expect(await flag("after notice")).toBe("same");
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("does not flag the cell after a reset", async () => {
+		const { kernels, registry, flag } = flaggingRegistry();
+		try {
+			expect(await flag("first")).toBe("same");
+			kernels[0]!.alive = false;
+			expect(await flag("reset", { reset: true })).toBe("same");
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	for (const disposal of ["disposeAll", "disposeByOwner"] as const) {
+		it(`does not flag a replacement after ${disposal} restores a record whose shutdown was unconfirmed`, async () => {
+			const { kernels, registry, flag } = flaggingRegistry({ unconfirmedShutdown: true });
+			try {
+				expect(await flag("first", { kernelOwnerId: "owner" })).toBe("same");
+				if (disposal === "disposeAll") await registry.disposeAll();
+				else await registry.disposeByOwner("owner");
+				expect(kernels[0]?.alive).toBe(false);
+				expect(await flag("after disposal", { kernelOwnerId: "owner" })).toBe("same");
+				expect(kernels).toHaveLength(2);
+			} finally {
+				for (const kernel of kernels) kernel.shutdown = FakeKernel.prototype.shutdown;
+				await registry.disposeAll();
+			}
+		});
+	}
 });

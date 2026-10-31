@@ -142,6 +142,10 @@ export function createKernelSessionRegistry<
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
 	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
+	// The kernel that served each session record's latest cell. A different live
+	// kernel at the next cell means the previous one died in between; reset and
+	// disposal make a new record instead, so they never look like a restart.
+	const servedKernels = new WeakMap<TSession, TKernel>();
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
 		sessions,
@@ -355,6 +359,8 @@ export function createKernelSessionRegistry<
 				cwd: session.cwd,
 				reason,
 			});
+			// Intentional disposal: a later replacement of this kernel is no surprise restart.
+			servedKernels.delete(session);
 			if (!sessions.has(id)) sessions.set(id, session);
 		}
 	}
@@ -408,6 +414,7 @@ export function createKernelSessionRegistry<
 				cwd: session.cwd,
 				reason,
 			});
+			servedKernels.delete(session);
 			if (!sessions.has(session.sessionKey)) sessions.set(session.sessionKey, session);
 		}
 	}
@@ -454,11 +461,17 @@ export function createKernelSessionRegistry<
 		const kernel = await acquireLiveSessionKernel(session, cwd, options);
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
 		throwIfCallerCancelled(options);
-		const runOptions = { ...options, cwd };
+		const previousKernel = servedKernels.get(session);
+		servedKernels.set(session, kernel);
+		const restarted = previousKernel !== undefined && previousKernel !== kernel;
+		const runOptions = restarted ? { ...options, cwd, kernelRestarted: true } : { ...options, cwd };
 		let result: R;
 		try {
 			result = await descriptor.executeWithKernel(kernel, code, runOptions);
 		} catch (err) {
+			// A thrown cell returns no output, so its restart notice never reached the
+			// caller: leave it for the next cell on this kernel.
+			if (restarted && servedKernels.get(session) === kernel) servedKernels.set(session, previousKernel);
 			if (
 				descriptor.isCancellation?.(err) ||
 				isCancellationError(err, descriptor.cancelledErrorClass) ||

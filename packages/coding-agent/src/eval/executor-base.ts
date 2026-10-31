@@ -78,6 +78,11 @@ export interface KernelExecutorBaseOptions {
 	bridgeSessionId?: string;
 	artifactId?: string;
 	artifactPath?: string;
+	/**
+	 * Set by the kernel session registry when this cell runs on a replacement for
+	 * a retained kernel that died after the session's previous cell.
+	 */
+	kernelRestarted?: boolean;
 }
 
 /** Normalised execution result produced by {@link executeWithKernelBase}. */
@@ -96,6 +101,16 @@ export interface KernelExecutionResult {
 	outputBytes: number;
 	displayOutputs: EvalDisplayOutput[];
 	stdinRequested: boolean;
+}
+
+/**
+ * First line of a cell that runs on a replacement for a retained runtime that
+ * died after the session's previous cell. It reuses the wording of the
+ * `eval-state-context` reminder a rebuilt session gets, so an agent that knows
+ * one recognises the other.
+ */
+export function formatKernelRestartNotice(runtimeLabel: string): string {
+	return `Kernel restarted: the previous ${runtimeLabel} is dead; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
 }
 
 /** Minimal kernel surface the base executor drives, satisfied by every backend kernel. */
@@ -513,6 +528,7 @@ export async function executeWithKernelBase<
 			: null;
 
 	try {
+		if (options?.kernelRestarted) sink.push(`${formatKernelRestartNotice(`${errorLogLabel} kernel`)}\n`);
 		if (remainingMs !== undefined && remainingMs <= 0) {
 			throw new cancelledErrorClass(true);
 		}
