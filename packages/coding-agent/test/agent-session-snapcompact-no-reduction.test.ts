@@ -421,11 +421,17 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 	 * A resumed session whose live context opens with a 10-frame snapcompact
 	 * archive (its frames blob references until read), followed by a few short
 	 * turns. A new archive of `frames` frames replaces that archive and the turns.
-	 * `contextNotes` puts persisted context notes ahead of the archive.
+	 * `contextNotes` puts persisted context notes ahead of the archive;
+	 * `withoutSource` stores the archive without the source text a new archive
+	 * re-renders it from, as archives written before `Archive.text` were.
 	 */
 	async function createArchivedSession(
 		frames: number,
-		{ settings = {}, contextNotes }: { settings?: Record<string, unknown>; contextNotes?: string } = {},
+		{
+			settings = {},
+			contextNotes,
+			withoutSource = false,
+		}: { settings?: Record<string, unknown>; contextNotes?: string; withoutSource?: boolean } = {},
 	): Promise<{ session: AgentSession; previousId: string }> {
 		tempDir = TempDir.createSync("@pi-snapcompact-resumed-archive-");
 		setAgentDir(path.join(tempDir.path(), "agent"));
@@ -449,6 +455,7 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 					frames: Array.from({ length: PREVIOUS_FRAMES }, () => persistedFrame),
 					totalChars: 40,
 					truncatedChars: 0,
+					...(withoutSource ? {} : { text: "first question first answer" }),
 				},
 			},
 		});
@@ -518,6 +525,14 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 		await session.compact(undefined, { mode: "snapcompact" });
 
 		expect(latestArchiveFrames(session, previousId)).toBe(6);
+	});
+
+	it("does not count frames it cannot re-render as replaced when the archive has no source text", async () => {
+		const { session, previousId } = await createArchivedSession(6, { withoutSource: true });
+
+		const error = await rejectionOf(session.compact(undefined, { mode: "snapcompact" }));
+		expect(String(error)).toContain("snapcompact would not reduce context");
+		expect(latestArchiveFrames(session, previousId)).toBeUndefined();
 	});
 
 	it("rejects a manual /compact snapcompact whose archive outgrows the one it replaces", async () => {

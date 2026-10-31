@@ -2714,8 +2714,18 @@ export class SessionMaintenance {
 		);
 		// The live summary, not one rebuilt from the entry: a resumed session's
 		// archive frames are blob references only the session manager resolves.
-		// Context notes can precede it.
-		const standingSummary = this.#host.messages().find(message => message.role === "compactionSummary");
+		// Context notes can precede it. An archive with frames but no source text
+		// (written before `Archive.text`) cannot be re-rendered into the new one,
+		// so its frames are not counted as replaced: crediting them would let a
+		// smaller candidate drop the only copy of that history.
+		const previousArchive = snapcompact.getPreservedArchive(preparation.previousPreserveData);
+		const carriesStandingSummary =
+			!previousArchive ||
+			previousArchive.frames.length === 0 ||
+			snapcompact.archiveSourceText(previousArchive) !== undefined;
+		const standingSummary = carriesStandingSummary
+			? this.#host.messages().find(message => message.role === "compactionSummary")
+			: undefined;
 		if (standingSummary) tokens += this.#tokenizer.countMessage(standingSummary);
 		tokens += this.#tokenizer.countMessages(preparation.messagesToSummarize, opts);
 		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages, opts);
