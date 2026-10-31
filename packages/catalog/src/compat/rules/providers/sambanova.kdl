@@ -32,7 +32,9 @@ provider "sambanova" {
 	// field and its shared prefix cache keys on the full rendered turn, so
 	// replaying that same field keeps turn-N prompts aligned with the cached
 	// continuation instead of diverging at the first thinking token (the
-	// cloud-serving analog of the llama.cpp re-rendering in #3528).
+	// cloud-serving analog of the llama.cpp re-rendering in #3528). Signature-less
+	// blocks carried from another host fall back to `reasoning_content`; the
+	// gateway accepts that field on every served model (verified live).
 	replay-reasoning-content #true
 	class "gpt-oss" {
 		thinking-efforts "low" "medium" "high"

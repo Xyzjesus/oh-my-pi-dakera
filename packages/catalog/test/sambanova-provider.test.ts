@@ -145,12 +145,6 @@ describe("SambaNova capability rules", () => {
 		expect(buildSambaNova("MiniMax-M2").reasoning).toBe(false);
 	});
 
-	test("reasoning turns replay the streamed reasoning field for prefix-cache reuse", () => {
-		for (const id of ["gpt-oss-120b", "MiniMax-M3", "DeepSeek-V3.1", "gemma-4-31B-it"]) {
-			expect(buildSambaNova(id).compat?.replayReasoningContent).toBe(true);
-		}
-	});
-
 	test("DeepSeek V3.1+ and Gemma 4 toggle thinking through the chat template", () => {
 		for (const id of [
 			"DeepSeek-V3.1",

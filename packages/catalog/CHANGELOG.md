@@ -14,6 +14,9 @@
 
 - SambaNova Cloud follow-up turns now reuse the provider's prefix cache, so multi-turn conversations stop re-processing earlier context ([#17555](https://github.com/can1357/oh-my-pi/pull/17555) by [@rjuez00](https://github.com/rjuez00))
 - Fixed SambaNova Cloud multi-turn requests missing the provider's prefix cache by replaying prior assistant reasoning ([#17555](https://github.com/can1357/oh-my-pi/pull/17555) by [@rjuez00](https://github.com/rjuez00)) on each turn
+### Added
+
+- SambaNova Cloud now replays prior assistant reasoning on multi-turn requests, so follow-up turns keep hitting the provider's prefix cache ([#17555](https://github.com/can1357/oh-my-pi/pull/17555) by [@rjuez00](https://github.com/rjuez00)) on each turn
 
 ## [18.14.1] - 2026-10-31
 
