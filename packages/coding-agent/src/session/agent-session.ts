@@ -1105,8 +1105,8 @@ export class AgentSession implements SettingsScope {
 		| undefined;
 	/** Active {@link holdIrcWakes} holds. */
 	#ircWakeHolds = 0;
-	/** IRC wakes waiting out a running idle compaction (see {@link #wakeForIrc}). */
-	#ircWakesAwaitingIdleCompaction = 0;
+	/** IRC wakes waiting out a context replacement (see {@link #wakeForIrc}). */
+	#ircWakesAwaitingCompaction = 0;
 	/** The observation whose monitor is attached; at most one at a time. */
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
@@ -1556,16 +1556,14 @@ export class AgentSession implements SettingsScope {
 			this.#irc.queueAside(wakeRecords);
 			return;
 		}
-		// Idle compaction rewrites history without owning a turn. Wait it out without claiming
-		// the session (an in-flight wake would make input typed meanwhile find it busy), then
-		// decide afresh. Meanwhile the records live only in this closure, so they are counted
-		// for `ircWakesPending`.
-		const idleCompaction = this.#maintenance.waitForIdleCompaction();
-		if (idleCompaction) {
+		// Compaction replaces history without this wake owning the turn. Wait without
+		// claiming the session, then decide afresh; the records remain in this closure.
+		const contextReplacement = this.#maintenance.waitForContextReplacement();
+		if (contextReplacement) {
 			const promptGeneration = this.#promptGeneration;
 			const sessionGeneration = this.#sessionGeneration;
-			this.#ircWakesAwaitingIdleCompaction++;
-			void idleCompaction
+			this.#ircWakesAwaitingCompaction++;
+			void contextReplacement
 				.then(async () => {
 					// A transition (/new, /clear, a switch) aborts long before it replaces the transcript, so
 					// let it settle first: only then does the session generation say which transcript is live.
@@ -1596,9 +1594,9 @@ export class AgentSession implements SettingsScope {
 					}
 					this.#wakeForIrc(wakeRecords);
 				})
-				.catch(error => logger.warn("IRC wake after idle compaction failed", { error: String(error) }))
+				.catch(error => logger.warn("IRC wake after compaction failed", { error: String(error) }))
 				.finally(() => {
-					this.#ircWakesAwaitingIdleCompaction--;
+					this.#ircWakesAwaitingCompaction--;
 				});
 			return;
 		}
@@ -2336,13 +2334,12 @@ export class AgentSession implements SettingsScope {
 			scheduleIdleFlush: run => {
 				this.#schedulePostPromptTask(
 					async signal => {
-						// Idle compaction rewrites history without owning a turn; flush into the compacted context.
-						// Cancellation (abort, session change, disposal) stops the wait at once instead of holding
-						// their post-prompt drain behind the compaction; abort re-requests the flush once it settles.
-						const idleCompaction = this.#maintenance.waitForIdleCompaction();
-						if (idleCompaction) {
+						// Wait for compaction to replace history and reconnect persistence before
+						// delivering results. Cancellation releases the task; abort re-requests the flush.
+						const contextReplacement = this.#maintenance.waitForContextReplacement();
+						if (contextReplacement) {
 							try {
-								await untilAborted(signal, idleCompaction);
+								await untilAborted(signal, contextReplacement);
 							} catch {
 								this.yieldQueue.cancelIdleFlushScheduling();
 								return;
@@ -10104,12 +10101,14 @@ export class AgentSession implements SettingsScope {
 	): Promise<boolean> {
 		// Captured before the awaits below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
-		// A message that may start a turn waits out idle compaction, as prompt() does; plain appends do not.
-		const idleCompaction =
-			options?.triggerTurn || options?.deliverAs === "aside" ? this.#maintenance.waitForIdleCompaction() : undefined;
-		if (idleCompaction) {
+		// A turn-triggering message waits out context replacement; plain appends do not.
+		const contextReplacement =
+			options?.triggerTurn || options?.deliverAs === "aside"
+				? this.#maintenance.waitForContextReplacement()
+				: undefined;
+		if (contextReplacement) {
 			const promptGeneration = this.#promptGeneration;
-			await idleCompaction;
+			await contextReplacement;
 			// A transition (/new, /clear, a switch) aborts long before it replaces the transcript, so let it
 			// settle first: only then does the session generation tell an abort from a session change.
 			if (this.isSessionTransitioning) await this.waitForSessionTransition();
@@ -12685,7 +12684,7 @@ export class AgentSession implements SettingsScope {
 	 * drop them.
 	 */
 	get ircWakesPending(): boolean {
-		return this.#ircWakeHolds > 0 || this.#ircWakesAwaitingIdleCompaction > 0 || this.#irc.hasPending();
+		return this.#ircWakeHolds > 0 || this.#ircWakesAwaitingCompaction > 0 || this.#irc.hasPending();
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */
