@@ -1,5 +1,8 @@
-import { renderCallChain, renderRunArg } from "../run-code";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { CELL_BUDGET_SLACK_MS } from "../run-scope";
+import { renderCallChain, renderRunArg } from "../run-code";
+import { TOOL_TIMEOUTS } from "../tool-timeouts";
 
 /** One allowlisted method invocation in a tab call chain. */
 export interface TabCallStep {
@@ -226,4 +229,18 @@ export function renderTabCall(chain: readonly TabCallStep[]): string {
 	throw new ToolError(
 		`Unknown tab helper "${root.method}". Direct helpers: ${DIRECT_METHODS_DESCRIPTION}; handles via tab.id(n)/tab.ref(id)/tab.frame(selector).`,
 	);
+}
+
+/**
+ * Tool budget in seconds that lets a call chain's trailing `{ timeout }` (ms) run in full, or
+ * `undefined` when the chain passes none. `invokeBrowser` uses it for `call` actions, which carry no
+ * `timeout` of their own: wait helpers clamp `timeout` to the budget less
+ * {@link CELL_BUDGET_SLACK_MS} (`resolveWaitTimeout`), so under the default budget an Eval
+ * `tab.waitForSelector(sel, { timeout: 50_000 })` would stop at 29 s. Never below the tool default.
+ */
+export function tabCallBudgetSeconds(chain: readonly TabCallStep[] | undefined): number | undefined {
+	const options = chain?.at(-1)?.args.at(-1);
+	const timeout = isRecord(options) ? options.timeout : undefined;
+	if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) return undefined;
+	return Math.max(TOOL_TIMEOUTS.browser.default, Math.ceil((timeout + CELL_BUDGET_SLACK_MS) / 1000));
 }

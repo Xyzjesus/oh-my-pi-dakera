@@ -1,10 +1,15 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { createContext, runInContext } from "node:vm";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
-
+import { resolveWaitTimeout } from "@oh-my-pi/pi-coding-agent/tools/browser/op-timeouts";
 import { cfgBrowserEnabled } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import * as supervisor from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function makeSession(settings = Settings.isolated({ "browser.enabled": true })): ToolSession {
 	return {
@@ -75,6 +80,43 @@ describe("browser prelude", () => {
 				text: expect.stringMatching(/^No tab named "missing-/),
 			},
 		]);
+	});
+
+	it("gives a direct wait helper the budget its explicit timeout needs (#17617)", async () => {
+		const budgets: number[] = [];
+		spyOn(supervisor, "runInTab").mockImplementation(async (_name, opts) => {
+			budgets.push(opts.timeoutMs);
+			return { displays: [], returnValue: true, screenshots: [] };
+		});
+		const effectiveWait = async (parameters: Record<string, unknown>, settings?: Settings): Promise<number> => {
+			const session = makeSession(settings);
+			await createBrowserPrelude(session).invoke(
+				{ action: "call", name: "docs", ...parameters },
+				{ session, toolCallId: "browser-call-budget" },
+			);
+			return resolveWaitTimeout(budgets.at(-1)!, 50_000);
+		};
+		const waitChain = [{ method: "waitForSelector", args: ["#closed", { timeout: 50_000 }] }];
+
+		// Eval's `tab.waitForSelector(sel, { timeout: 50000 })` used to stop at 29000ms.
+		expect(await effectiveWait({ chain: waitChain })).toBe(50_000);
+		// The handle hop's trailing options drive the budget too.
+		expect(
+			await effectiveWait({
+				chain: [
+					{ method: "frame", args: ["#pay"] },
+					{ method: "waitForSelector", args: ["#closed", { timeout: 50_000 }] },
+				],
+			}),
+		).toBe(50_000);
+		// An explicit call `timeout` and `tools.maxTimeout` still bound the wait.
+		expect(await effectiveWait({ chain: waitChain, timeout: 10 })).toBe(9_000);
+		expect(
+			await effectiveWait(
+				{ chain: waitChain },
+				Settings.isolated({ "browser.enabled": true, "tools.maxTimeout": 20 }),
+			),
+		).toBe(19_000);
 	});
 
 	it("owns actions and exposes tab handles instead of browser.run", async () => {
