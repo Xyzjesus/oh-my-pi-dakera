@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
 import { disposeAllKernelSessions } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { getEvalState } from "@oh-my-pi/pi-coding-agent/eval/state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 type Language = "py" | "js";
 
@@ -13,7 +16,7 @@ const NOTICE: Record<Language, string> = {
 	js: "Kernel restarted: the previous JS worker is dead; state is unavailable. Re-run needed setup",
 };
 
-function makeSession(evalSessionId: string): ToolSession {
+function makeSession(evalSessionId: string, preludes?: () => readonly EvalPreludeDefinition[]): ToolSession {
 	return {
 		cwd: process.cwd(),
 		hasUI: false,
@@ -21,6 +24,7 @@ function makeSession(evalSessionId: string): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,
 		getEvalSessionId: () => evalSessionId,
+		...(preludes ? { getEvalPreludes: preludes } : {}),
 	};
 }
 
@@ -163,6 +167,69 @@ describe("eval kernel restart notice", () => {
 		const next = await run(tool, "js", READ_VALUE.js);
 		expectNotice(next, "js");
 		const after = await run(tool, "js", "print('after')");
+		expectNoNotice(after);
+	}, 120_000);
+
+	it("py: a cell that fails in prelude setup on the replacement neither hides nor falsifies the notice", async () => {
+		using markers = TempDir.createSync("@restart-notice-prelude-");
+		const entered = path.join(markers.path(), "entered");
+		const release = path.join(markers.path(), "release");
+		let preludes: readonly EvalPreludeDefinition[] = [];
+		const session = makeSession(`restart-notice-prelude-${crypto.randomUUID()}`, () => preludes);
+		const tool = new EvalTool(session);
+
+		const first = await run(tool, "py", PID_CELL.py);
+		await killRuntime(session, "py", pidOf(first));
+
+		// Cell A starts on the replacement kernel; its prelude blocks, then raises.
+		preludes = [
+			{
+				name: "blocking-failure",
+				documentation: "waits for the release file, then fails",
+				exports: [],
+				javascript: "",
+				python: [
+					"import asyncio, pathlib",
+					`pathlib.Path(${JSON.stringify(entered)}).write_text("entered")`,
+					`while not pathlib.Path(${JSON.stringify(release)}).exists():`,
+					"    await asyncio.sleep(0.01)",
+					'raise RuntimeError("prelude failed")',
+				].join("\n"),
+				invoke: async () => ({ content: [] }),
+			},
+		];
+		const failing = run(tool, "py", "print('not reached')").catch((error: unknown) => ({
+			text: String(error),
+			isError: true,
+		}));
+		// The prelude runs in the kernel process; its marker file is the only signal it has started.
+		const deadline = Date.now() + 30_000;
+		while (!(await Bun.file(entered).exists())) {
+			if (Date.now() > deadline) throw new Error("prelude never started");
+			await Bun.sleep(10);
+		}
+
+		// Cell B runs on the same replacement while A waits: it is the first to run there.
+		preludes = [];
+		const sibling = await run(
+			tool,
+			"py",
+			"import math, os\nsurvives = 42\ndef saved_fn(): return 43\nprint('pid', os.getpid())",
+		);
+		expectNotice(sibling, "py");
+
+		await Bun.write(release, "release");
+		const failed = await failing;
+		expect(failed.text).toContain("prelude failed");
+		expectNoNotice(failed);
+
+		// Cell C still has everything B defined, on B's process, and must not be told it is gone.
+		const after = await run(
+			tool,
+			"py",
+			"import os\nprint('survived', survives, math.sqrt(4), saved_fn(), os.getpid())",
+		);
+		expect(after.text).toContain(`survived 42 2.0 43 ${pidOf(sibling)}`);
 		expectNoNotice(after);
 	}, 120_000);
 });

@@ -79,10 +79,11 @@ export interface KernelExecutorBaseOptions {
 	artifactId?: string;
 	artifactPath?: string;
 	/**
-	 * Set by the kernel session registry when this cell runs on a replacement for
-	 * a retained kernel that died after the session's previous cell.
+	 * Set by the kernel session registry. Called once, when the cell starts on its
+	 * kernel: records that kernel as the one the caller has seen and returns true
+	 * when it replaced a kernel that died after the session's previous cell.
 	 */
-	kernelRestarted?: boolean;
+	claimKernelRestartNotice?: () => boolean;
 }
 
 /** Normalised execution result produced by {@link executeWithKernelBase}. */
@@ -528,7 +529,7 @@ export async function executeWithKernelBase<
 			: null;
 
 	try {
-		if (options?.kernelRestarted) sink.push(`${formatKernelRestartNotice(`${errorLogLabel} kernel`)}\n`);
+		if (options?.claimKernelRestartNotice?.()) sink.push(`${formatKernelRestartNotice(`${errorLogLabel} kernel`)}\n`);
 		if (remainingMs !== undefined && remainingMs <= 0) {
 			throw new cancelledErrorClass(true);
 		}
