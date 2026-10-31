@@ -644,6 +644,9 @@ export interface InteractiveModeContext {
 	handleBtwCopyKey(): Promise<boolean>;
 	canFollowUpBtw(): boolean;
 	handleBtwFollowUpKey(): boolean;
+	/** The inject key (`app.btw.inject`, Alt+I) on a completed /btw answer's `<inject>` block (`btw.inject`): steer the main session with it. */
+	canInjectBtw(): boolean;
+	handleBtwInjectKey(): boolean;
 	handleBtwBranch(
 		question: string,
 		assistantMessage: AssistantMessage,

@@ -18,7 +18,10 @@ import {
 	getBtwLatestTurn,
 	getBtwTopicLabel,
 	getBtwTurns,
+	type BtwInjectParts,
+	splitBtwInject,
 } from "./btw-history";
+import { type BtwInjectState, describeBtwInject, renderBtwInjectLines } from "./btw-inject";
 import { compactImageMarkers, formatVisionMarker } from "../prompt/composer-attachments";
 import { extractImagePastePathsFromText } from "../prompt/custom-editor";
 import { BracketedPasteHandler } from "../bracketed-paste";
@@ -29,6 +32,8 @@ import {
 	matchesSelectPageDown,
 	matchesSelectPageUp,
 	matchesSelectUp,
+	appBtwInjectKeys,
+	matchesAppBtwInject,
 } from "../keybinding-matchers";
 import type { SpaceHoldHandler } from "../space-hold";
 import { sanitizeErrorLine } from "../chrome/error-block";
@@ -77,6 +82,15 @@ interface BtwHistoryPanelOptions {
 	 * first. For a host with no inline panel to fall back to (Tern).
 	 */
 	escapeHides?: boolean;
+	/**
+	 * Given only while `btw.inject` is on for this view: a finished turn's closed `<inject>`
+	 * block shows apart from its prose while `injectState` reports it pending (sendable) or
+	 * sent, and plain text otherwise; a streaming turn always shows its block. The inject
+	 * key sends the selected record's when `canInject` allows.
+	 */
+	canInject?: (record: BtwHistoryRecord) => boolean;
+	onInject?: (record: BtwHistoryRecord) => void;
+	injectState?: (record: BtwHistoryRecord, turnIndex: number) => BtwInjectState | undefined;
 }
 
 interface FollowUpComposer {
@@ -95,6 +109,10 @@ interface RenderedTurn {
 	turn: BtwHistoryTurn;
 	question: Markdown;
 	answer: Markdown;
+	/** The answer after its `<inject>` block; empty without one. */
+	after: Markdown;
+	/** How the answer's `<inject>` block showed; `undefined` when it rendered as plain text. */
+	block: BtwInjectState | undefined;
 	lines: readonly string[];
 	width: number;
 }
@@ -110,6 +128,8 @@ interface BtwHistoryNativeMemo {
 	followUpPending: boolean;
 	canFollowUp: boolean;
 	copied: boolean;
+	canInject: boolean;
+	injected: boolean;
 	scroll: NativeScroll | undefined;
 	node: NativeNode;
 }
@@ -512,6 +532,14 @@ export class BtwHistoryPanel implements Component, Focusable {
 			if (record && getBtwCopyText(record) !== undefined) this.#options.onCopy(record);
 			return;
 		}
+		if (this.#options.onInject && matchesAppBtwInject(data)) {
+			if (record && this.#options.canInject?.(record)) {
+				this.#options.onInject(record);
+				this.#detailDirty = true;
+				this.#options.requestRender();
+			}
+			return;
+		}
 		// Legacy terminals deliver Ctrl+/ (and Ctrl+_) as US without Kitty protocol.
 		if (
 			matchesKey(data, "tab") ||
@@ -576,6 +604,9 @@ export class BtwHistoryPanel implements Component, Focusable {
 		const composer = this.#composer;
 		const canFollowUp = record !== undefined && this.#canFollowUp(record);
 		const copied = record !== undefined && this.#isCopied(record);
+		const canInject = record !== undefined && this.#options.canInject?.(record) === true;
+		const injected =
+			record !== undefined && this.#options.injectState?.(record, record.followUps?.length ?? 0) === "sent";
 		const memo = this.#native;
 		if (
 			memo?.records === this.#records &&
@@ -587,6 +618,8 @@ export class BtwHistoryPanel implements Component, Focusable {
 			memo.followUpPending === this.#followUpPending &&
 			memo.canFollowUp === canFollowUp &&
 			memo.copied === copied &&
+			memo.canInject === canInject &&
+			memo.injected === injected &&
 			memo.scroll === this.#scroll
 		) {
 			return memo.node;
@@ -612,7 +645,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		} else {
 			children.push(this.#describeEmpty());
 		}
-		children.push(this.#describeActions(record, canFollowUp, copied));
+		children.push(this.#describeActions(record, canFollowUp, copied, canInject));
 		// The sheet is the frame (`nativeOverlay`); its last row is the pinned footer.
 		const described = col(children, { gap: "none" });
 		this.#native = {
@@ -625,6 +658,8 @@ export class BtwHistoryPanel implements Component, Focusable {
 			followUpPending: this.#followUpPending,
 			canFollowUp,
 			copied,
+			canInject,
+			injected,
 			scroll: this.#scroll,
 			node: described,
 		};
@@ -640,6 +675,12 @@ export class BtwHistoryPanel implements Component, Focusable {
 					return;
 				case "copy-answer":
 					if (record && getBtwCopyText(record) !== undefined) this.#options.onCopy(record);
+					break;
+				case "inject":
+					if (record && this.#options.canInject?.(record)) {
+						this.#options.onInject?.(record);
+						this.#detailDirty = true;
+					}
 					break;
 				case "follow-up":
 					if (record) this.openFollowUp(record.id);
@@ -698,12 +739,33 @@ export class BtwHistoryPanel implements Component, Focusable {
 	/** The selected side question as a short document: the asked question titles each answer. */
 	#describeThread(record: BtwHistoryRecord): NativeNode {
 		const turns = getDisplayTurns(record);
-		const children: NativeChild[] = turns.map((turn, index) => this.#describeTurn(turn, index, `turn-${index}`));
+		const children: NativeChild[] = turns.map((turn, index) =>
+			this.#describeTurn(turn, index, `turn-${index}`, this.#injectBlock(record, turn, index)),
+		);
 		if (this.#composer) children.push(this.#describeComposer(this.#composer));
 		return node("col", { role: "omp.btw.thread" }, children, "thread");
 	}
 
-	#describeTurn(turn: BtwHistoryTurn, index: number, key: string): NativeNode {
+	/** The turn's `<inject>` block to show apart from its prose, if any (see {@link BtwHistoryPanelOptions.injectState}). */
+	#injectBlock(
+		record: BtwHistoryRecord,
+		turn: BtwHistoryTurn,
+		index: number,
+	): { parts: BtwInjectParts; state: BtwInjectState } | undefined {
+		if (!this.#options.injectState) return undefined;
+		const parts = splitBtwInject(turn.answer);
+		if (!parts) return undefined;
+		if (turn.status === "running") return { parts, state: "pending" };
+		const state = parts.closed ? this.#options.injectState(record, index) : undefined;
+		return state ? { parts, state } : undefined;
+	}
+
+	#describeTurn(
+		turn: BtwHistoryTurn,
+		index: number,
+		key: string,
+		block: { parts: BtwInjectParts; state: BtwInjectState } | undefined,
+	): NativeNode {
 		const meta: TspSpan[] =
 			index === 0
 				? [span(this.#dateFormat.format(turn.createdAt))]
@@ -717,11 +779,23 @@ export class BtwHistoryPanel implements Component, Focusable {
 		];
 		// A failed turn with no text says only why it failed.
 		if (turn.answer.trim() || !turn.error) {
-			const answer = turn.answer.trim()
-				? md(sanitizeDisplayText(turn.answer), { stream: turn.status === "running" })
-				: text([span(turn.status === "running" ? "Thinking…" : "No answer text.", "dim")], {
+			const stream = turn.status === "running";
+			const before = block?.parts.before.trim();
+			const after = block?.parts.after.trim();
+			const answer = !turn.answer.trim()
+				? text([span(turn.status === "running" ? "Thinking…" : "No answer text.", "dim")], {
 						role: "omp.btw.pending",
-					});
+					})
+				: block
+					? col(
+							[
+								...(before ? [md(sanitizeDisplayText(before), { stream })] : []),
+								describeBtwInject(block.parts.inject, block.state === "sent"),
+								...(after ? [md(sanitizeDisplayText(after), { stream })] : []),
+							],
+							{ gap: "sm" },
+						)
+					: md(sanitizeDisplayText(turn.answer), { stream });
 			children.push(node("col", { role: "omp.btw.answer" }, [answer], "answer"));
 		}
 		if (turn.error) {
@@ -772,7 +846,12 @@ export class BtwHistoryPanel implements Component, Focusable {
 	 * primary action (Follow up, or Send while composing) in the corner. Keys
 	 * live in the buttons' tooltips.
 	 */
-	#describeActions(record: BtwHistoryRecord | undefined, canFollowUp: boolean, copied: boolean): NativeNode {
+	#describeActions(
+		record: BtwHistoryRecord | undefined,
+		canFollowUp: boolean,
+		copied: boolean,
+		canInject: boolean,
+	): NativeNode {
 		if (this.#composer) {
 			return actionBar([
 				null,
@@ -784,6 +863,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		const hides = this.#options.escapeHides === true;
 		const buttons: (NativeNode | null)[] = [];
 		if (running) buttons.push(actionButton("Stop answer", "stop", { keys: hides ? "x" : "escape" }));
+		if (canInject) buttons.push(actionButton("Inject into main", "inject", { keys: appBtwInjectKeys()[0] }));
 		if (record && getBtwCopyText(record) !== undefined) {
 			buttons.push(actionButton(copied ? "Copy again" : "Copy answer", "copy-answer", { keys: "c" }));
 			if (copied) buttons.push(text([span("✓ Copied", "success")], { role: "omp.btw.copied" }));
@@ -847,7 +927,12 @@ export class BtwHistoryPanel implements Component, Focusable {
 		});
 	}
 
-	#renderTurn(turn: BtwHistoryTurn, cached: RenderedTurn | undefined, width: number): RenderedTurn {
+	#renderTurn(
+		turn: BtwHistoryTurn,
+		cached: RenderedTurn | undefined,
+		width: number,
+		block: { parts: BtwInjectParts; state: BtwInjectState } | undefined,
+	): RenderedTurn {
 		const previous = cached?.turn;
 		if (
 			cached &&
@@ -856,14 +941,18 @@ export class BtwHistoryPanel implements Component, Focusable {
 			turn.answer === previous?.answer &&
 			turn.status === previous?.status &&
 			turn.error === previous?.error &&
-			turn.createdAt === previous?.createdAt
+			turn.createdAt === previous?.createdAt &&
+			block?.state === cached.block
 		) {
 			return cached;
 		}
 		const question = cached?.question ?? new Markdown("", 0, 0, getMarkdownTheme());
 		const answer = cached?.answer ?? new Markdown("", 0, 0, getMarkdownTheme());
+		const after = cached?.after ?? new Markdown("", 0, 0, getMarkdownTheme());
 		if (turn.question !== previous?.question) question.setText(sanitizeDisplayText(turn.question));
-		if (turn.answer !== previous?.answer) answer.setText(sanitizeDisplayText(turn.answer));
+		// The block's state can change while the answer stays the same (sent, or no longer sendable).
+		answer.setText(sanitizeDisplayText(block ? block.parts.before.trim() : turn.answer));
+		after.setText(sanitizeDisplayText(block?.parts.after.trim() ?? ""));
 		const status = STATUS[turn.status];
 		const lines = [
 			...wrapTextWithAnsi(
@@ -876,7 +965,11 @@ export class BtwHistoryPanel implements Component, Focusable {
 			"",
 			theme.bold(theme.fg("accent", "Answer")),
 		];
-		if (turn.answer.trim()) lines.push(...answer.render(width));
+		if (turn.answer.trim() && block) {
+			if (block.parts.before.trim()) lines.push(...answer.render(width), "");
+			lines.push(...renderBtwInjectLines(block.parts.inject, width, block.state === "sent"));
+			if (block.parts.after.trim()) lines.push("", ...after.render(width));
+		} else if (turn.answer.trim()) lines.push(...answer.render(width));
 		else
 			lines.push(
 				...wrapTextWithAnsi(
@@ -898,6 +991,8 @@ export class BtwHistoryPanel implements Component, Focusable {
 			},
 			question,
 			answer,
+			after,
+			block: block?.state,
 			lines,
 			width,
 		};
@@ -915,7 +1010,12 @@ export class BtwHistoryPanel implements Component, Focusable {
 			if (record) {
 				const turns = getDisplayTurns(record);
 				for (let index = 0; index < turns.length; index++) {
-					const cached = this.#renderTurn(turns[index]!, this.#turns[index], inner);
+					const cached = this.#renderTurn(
+						turns[index]!,
+						this.#turns[index],
+						inner,
+						this.#injectBlock(record, turns[index]!, index),
+					);
 					this.#turns[index] = cached;
 					if (index > 0) lines.push("", theme.fg("dim", theme.boxRound.horizontal.repeat(inner)), "");
 					lines.push(...cached.lines);
@@ -975,6 +1075,8 @@ export class BtwHistoryPanel implements Component, Focusable {
 				];
 		if (!composer) {
 			if (record && this.#canFollowUp(record)) actions.push(rawKeyHint(["f", "enter"], "follow up"));
+			const injectKey = appBtwInjectKeys()[0];
+			if (injectKey && record && this.#options.canInject?.(record)) actions.push(rawKeyHint(injectKey, "inject"));
 			if (record && getBtwCopyText(record) !== undefined) {
 				if (this.#isCopied(record))
 					actions.push(theme.fg("success", `✓ copied · ${formatKeyHint("c")} to copy again`));

@@ -7,13 +7,19 @@ import {
 	BtwHistoryStore,
 	getBtwCopyText,
 	getBtwLatestTurn,
+	getBtwRecordInject,
+	getBtwTurnKey,
 } from "../../session/btw-history";
 import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-turn";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
 import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
+import type { BtwInjectState } from "@oh-my-pi/pi-tui/overlays/btw-inject";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
+import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import type { DroppedPrompt } from "../../session/agent-session-types";
+import { cfgBtwInject } from "../settings";
 import type { InteractiveModeContext } from "../types";
 
 interface BtwRequest {
@@ -32,6 +38,11 @@ interface BtwRequest {
 	/** At least one checkpoint belongs to this request; later failures must block lifecycle changes. */
 	persisted: boolean;
 	conversationKey: string;
+	/**
+	 * `btw.inject` eligibility when the question was asked, fixed for the request's life so the
+	 * prompt instruction, the highlighted block, and the inject key always agree.
+	 */
+	injectEnabled: boolean;
 }
 
 function assistantMessageWithReplyText(assistantMessage: AssistantMessage, replyText: string): AssistantMessage {
@@ -84,6 +95,19 @@ export class BtwController {
 	#historyOverlay: OverlayHandle | undefined;
 	readonly #writes = new Set<Promise<boolean>>();
 	readonly #failedWrites = new Map<BtwRequest, Error>();
+	/**
+	 * Turns answered in this process with the inject instruction (`btw.inject` eligible when
+	 * asked), keyed by `getBtwTurnKey`: only these can be injected, so history from an earlier
+	 * run, or an answer asked while injecting was off, never sends a prompt. Record ids are
+	 * unique, so these sets outlive session changes.
+	 */
+	readonly #freshTurns = new Set<string>();
+	/** Turns sent to the main session, so neither surface steers twice. */
+	readonly #injected = new Set<string>();
+	/** Turns whose send is in flight: the inject key does nothing until it lands or fails. */
+	readonly #injecting = new Set<string>();
+	/** In-flight sends by text, so a prompt the session drops comes back here instead of the editor. */
+	readonly #droppedInjects = new Map<string, (prompt: DroppedPrompt) => void>();
 
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
@@ -123,6 +147,7 @@ export class BtwController {
 
 	#branchUnavailableReason(): string | undefined {
 		if (this.#branchInFlight) return "a branch is already in progress";
+		if (this.#injecting.size > 0) return "a /btw prompt is still sending";
 		if (this.#transitionCount > 0) return "a session operation is in progress";
 		if (!this.#visible || this.#activeRequest?.component.isBranchable() !== true) return "the answer is not ready";
 		if (this.#activeRequest.session !== this.ctx.session || this.ctx.focusedAgentId)
@@ -234,6 +259,169 @@ export class BtwController {
 		const request = this.#activeRequest;
 		if (!request || !this.canFollowUp()) return false;
 		return this.#showHistory(request.store).openFollowUp(request.record.id);
+	}
+
+	canInject(): boolean {
+		const request = this.#activeRequest;
+		return (
+			this.#visible &&
+			request !== undefined &&
+			this.#isActiveRequest(request) &&
+			this.#canInjectRecord(request.record, request.injectEnabled)
+		);
+	}
+
+	handleInject(): boolean {
+		const request = this.#activeRequest;
+		if (!request || !this.canInject()) return false;
+		this.#inject(request.record);
+		return true;
+	}
+
+	/**
+	 * Whether side answers about `session` may steer the main session: `btw.inject` is on, the
+	 * main session is in view, and this host runs its turns (not a collab guest). Read once per
+	 * surface (inline answer, history sheet) and kept, so one value gates the prompt
+	 * instruction, the highlighted block, and the inject key for that surface.
+	 */
+	#injectEnabled(session: InteractiveModeContext["session"]): boolean {
+		return (
+			cfgBtwInject.get(this.ctx.settings) &&
+			session === this.ctx.session &&
+			!this.ctx.focusedAgentId &&
+			!this.ctx.collabGuest
+		);
+	}
+
+	#canInjectRecord(record: BtwHistoryRecord, enabled: boolean): boolean {
+		const key = getBtwTurnKey(record);
+		return (
+			enabled &&
+			// Follow-ups' lifecycle gates: a new main-session turn must not race a branch or session move.
+			!this.#starting &&
+			!this.#branchInFlight &&
+			this.#transitionCount === 0 &&
+			this.#freshTurns.has(key) &&
+			!this.#injected.has(key) &&
+			!this.#injecting.has(key) &&
+			getBtwRecordInject(record) !== undefined
+		);
+	}
+
+	/** How a turn's `<inject>` block shows in history: sent, still sendable (the latest fresh turn), or plain text. */
+	#injectState(record: BtwHistoryRecord, turnIndex: number): BtwInjectState | undefined {
+		const key = getBtwTurnKey(record, turnIndex);
+		if (this.#injected.has(key)) return "sent";
+		return turnIndex === (record.followUps?.length ?? 0) && this.#freshTurns.has(key) ? "pending" : undefined;
+	}
+
+	/**
+	 * A prompt the session dropped before dispatch: if it is an inject in flight, take it back so
+	 * the inject key stays its one retry path (putting it in the editor too would offer a second
+	 * way to send it). Returns whether it was an inject.
+	 */
+	reclaimDroppedPrompt(prompt: DroppedPrompt): boolean {
+		const reclaim = this.#droppedInjects.get(prompt.text);
+		if (!reclaim) return false;
+		this.#droppedInjects.delete(prompt.text);
+		reclaim(prompt);
+		return true;
+	}
+
+	/**
+	 * Send the topic's steering prompt to the main session as a user message: a steer while the
+	 * agent runs, else a new turn. Slash commands and templates are not expanded, so model-written
+	 * text never runs as a command. The turn counts as sent once the prompt is admitted. The key is
+	 * the one way to retry: a prompt the session drops before dispatch comes back through
+	 * {@link reclaimDroppedPrompt} instead of the editor, and one refused before it reached the
+	 * transcript (no model or API key) rolls back the same way. A failure after the message reached
+	 * the transcript or the steer queue keeps it marked sent, so it can never be sent twice.
+	 */
+	#inject(record: BtwHistoryRecord): void {
+		const text = getBtwRecordInject(record);
+		if (!text) return;
+		const key = getBtwTurnKey(record);
+		const session = this.ctx.session;
+		const settle = (sent: boolean): void => {
+			this.#injecting.delete(key);
+			if (sent) this.#injected.add(key);
+			else this.#injected.delete(key);
+			// Only the turn that was sent: a follow-up may have taken the panel while the send waited.
+			const request = this.#activeRequest;
+			if (request && getBtwTurnKey(request.record) === key) request.component.setInjected(sent);
+			this.#refreshHistory();
+		};
+		const fail = (error: unknown): void => {
+			settle(false);
+			this.ctx.showError(sanitizeErrorLine(`Cannot inject /btw prompt: ${toError(error).message}`));
+		};
+		const send = (): void => {
+			let admitted = false;
+			let queued = false;
+			let reclaimed = false;
+			const lastUserMessage = () => session.messages.findLast(message => message.role === "user");
+			const userBefore = lastUserMessage();
+			const reclaim = (prompt: DroppedPrompt): void => {
+				reclaimed = true;
+				settle(false);
+				if (prompt.reason) {
+					this.ctx.showError(sanitizeErrorLine(`Cannot inject /btw prompt: ${prompt.reason}`));
+					return;
+				}
+				const retry = appKey(this.ctx.keybindings, "app.btw.inject");
+				this.ctx.showStatus(retry ? `/btw prompt not sent · ${retry} to retry` : "/btw prompt not sent", {
+					dim: true,
+				});
+			};
+			this.#droppedInjects.set(text, reclaim);
+			session
+				.prompt(text, {
+					expandPromptTemplates: false,
+					streamingBehavior: "steer",
+					throwOnDrop: true,
+					onPromptQueued: () => {
+						queued = true;
+					},
+					onPromptAdmitted: () => {
+						admitted = true;
+						settle(true);
+					},
+				})
+				.then(
+					// Some drops resolve instead of rejecting; without an admission nothing was sent.
+					() => {
+						if (!admitted && !reclaimed) settle(false);
+					},
+					(error: unknown) => {
+						if (reclaimed) return;
+						if (queued || lastUserMessage() !== userBefore) {
+							// Already in the transcript or the steer queue: it was sent, so keep the mark.
+							this.#injecting.delete(key);
+							this.#refreshHistory();
+							this.ctx.showError(sanitizeErrorLine(toError(error).message));
+							return;
+						}
+						fail(error);
+					},
+				)
+				.finally(() => {
+					if (this.#droppedInjects.get(text) === reclaim) this.#droppedInjects.delete(text);
+				});
+		};
+		this.#injecting.add(key);
+		if (!session.hasPendingDeferredExtensions) {
+			send();
+			return;
+		}
+		// `prompt()` would wait for startup-deferred extensions before its own session-switch
+		// checks run, so a `/new` in that wait could land this prompt in the new session. Wait
+		// here instead and drop the send if the session moved on (dispose bumps the generation).
+		const generation = this.#generation;
+		const sessionId = this.ctx.sessionManager.getSessionId();
+		session.loadDeferredExtensions().then(() => {
+			if (generation === this.#generation && sessionId === this.ctx.sessionManager.getSessionId()) send();
+			else settle(false);
+		}, fail);
 	}
 
 	handleCancel(): boolean {
@@ -444,6 +632,7 @@ export class BtwController {
 			this.#clearCompletedState();
 			const leafId = this.#sessionManager.getLeafId();
 			const { record, history, conversationKey } = beginBtwTurn(trimmedQuestion, leafId, previous, images, title);
+			const injectEnabled = this.#injectEnabled(viewSession);
 			const request: BtwRequest = {
 				component: new BtwPanelComponent({
 					question: trimmedQuestion,
@@ -451,6 +640,7 @@ export class BtwController {
 					tui: this.ctx.ui,
 					canBranch: () => this.canBranch(),
 					canFollowUp: () => this.canFollowUp(),
+					canInject: injectEnabled ? () => this.canInject() : undefined,
 				}),
 				abortController: new AbortController(),
 				question: trimmedQuestion,
@@ -464,6 +654,7 @@ export class BtwController {
 				history,
 				conversationKey,
 				persisted: false,
+				injectEnabled,
 			};
 			this.#activeRequest = request;
 			// Tern shows the answer in the BTW history sheet (its body scrolls, its
@@ -543,6 +734,15 @@ export class BtwController {
 			spaceHoldKeys: this.ctx.keybindings.getKeys("app.stt.pushToTalk"),
 			spaceHold: input => this.ctx.dictationSpaceHold(input),
 			requestRender: () => this.ctx.ui.requestRender(),
+			...(this.#injectEnabled(this.ctx.focusedAgentId ? this.ctx.viewSession : this.ctx.session)
+				? {
+						canInject: (record: BtwHistoryRecord) => this.#canInjectRecord(record, true),
+						onInject: (record: BtwHistoryRecord) => {
+							if (this.#canInjectRecord(record, true)) this.#inject(record);
+						},
+						injectState: (record: BtwHistoryRecord, turnIndex: number) => this.#injectState(record, turnIndex),
+					}
+				: {}),
 			getHeight: () => this.ctx.ui.terminal.rows,
 			// Tern has no inline panel: Esc puts the sheet away, `x` cancels.
 			escapeHides: this.ctx.ui.nativeRendering,
@@ -630,6 +830,8 @@ export class BtwController {
 				question: request.question,
 				images: request.images,
 				history: request.history,
+				// The same eligibility as the block and the key: no instruction where a block could never be sent.
+				inject: request.injectEnabled,
 				conversationKey: request.conversationKey,
 				onTextDelta: delta => {
 					const latest = getBtwLatestTurn(request.record);
@@ -644,6 +846,8 @@ export class BtwController {
 			});
 			if (getBtwLatestTurn(request.record).status !== "running") return;
 			this.#updateRequest(request, { answer: replyText, status: "complete", updatedAt: Date.now() });
+			// Only an answer asked with the inject instruction can be sent, even if the setting is turned on later.
+			if (request.injectEnabled) this.#freshTurns.add(getBtwTurnKey(request.record));
 			if (this.#isActiveRequest(request)) {
 				request.component.setAnswer(replyText);
 				request.component.markComplete();

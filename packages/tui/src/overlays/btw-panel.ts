@@ -9,6 +9,9 @@ import { formatKeyHint } from "../app-keybindings";
 import type { NativeNode } from "../native/node";
 import { col, md, node, span, text } from "../native/describe";
 import { hintsRow, type NativeHint, statusHintsRow } from "../native/overlay";
+import { appBtwInjectKeys } from "../keybinding-matchers";
+import { type BtwInjectParts, getBtwInject, splitBtwInject } from "./btw-history";
+import { describeBtwInject, renderBtwInjectLines } from "./btw-inject";
 
 type BtwPanelState = "running" | "complete" | "branching" | "aborted" | "error";
 
@@ -19,21 +22,42 @@ interface BtwPanelComponentOptions {
 	tui: TUI;
 	canBranch?: () => boolean;
 	canFollowUp?: () => boolean;
+	/**
+	 * Given only while `btw.inject` is on: shows the answer's `<inject>` block as a highlighted
+	 * block (send arrows once sent) and offers the inject key (`app.btw.inject`) while this returns true.
+	 */
+	canInject?: () => boolean;
+}
+
+/** An answer's `<inject>` block as a panel section; wraps at render time. */
+class BtwInjectBlock implements Component {
+	constructor(
+		readonly inject: string,
+		readonly injected: boolean,
+	) {}
+
+	render(width: number): readonly string[] {
+		return renderBtwInjectLines(this.inject, width, this.injected);
+	}
+
+	invalidate(): void {}
 }
 
 export class BtwPanelComponent extends OverlayPanel {
 	#tui: TUI;
 	#canBranch: (() => boolean) | undefined;
 	#canFollowUp: (() => boolean) | undefined;
+	#canInject: (() => boolean) | undefined;
 	#state: BtwPanelState = "running";
 	#answer = "";
 	#errorMessage: string | undefined;
 	#visibleAnswer = "";
 	#closed = false;
 	#copied = false;
+	#injected = false;
 	#baseTitle: string;
 	readonly #content: StreamingPanelContent;
-	#native: { node: NativeNode; canFollowUp: boolean; canBranch: boolean } | undefined;
+	#native: { node: NativeNode; canFollowUp: boolean; canBranch: boolean; canInject: boolean } | undefined;
 
 	constructor(options: BtwPanelComponentOptions) {
 		const baseTitle = replaceTabs(options.title ?? `/btw ${options.question}`);
@@ -42,8 +66,9 @@ export class BtwPanelComponent extends OverlayPanel {
 		this.#tui = options.tui;
 		this.#canBranch = options.canBranch;
 		this.#canFollowUp = options.canFollowUp;
+		this.#canInject = options.canInject;
 		this.#content = new StreamingPanelContent(() => ({
-			sections: [this.#contentComponent()],
+			sections: this.#contentSections(),
 			footer: () => this.#footerLine(),
 		}));
 		this.addChild(this.#content);
@@ -54,6 +79,7 @@ export class BtwPanelComponent extends OverlayPanel {
 		if (!delta || this.#closed) return;
 		this.#answer += delta;
 		this.#visibleAnswer = replaceTabs(this.#answer).trim();
+		this.#injected = false;
 		this.#setCopied(false);
 		this.#rebuild();
 	}
@@ -62,6 +88,7 @@ export class BtwPanelComponent extends OverlayPanel {
 		if (this.#closed) return;
 		this.#answer = text;
 		this.#visibleAnswer = replaceTabs(text).trim();
+		this.#injected = false;
 		this.#setCopied(false);
 		this.#rebuild();
 	}
@@ -78,6 +105,13 @@ export class BtwPanelComponent extends OverlayPanel {
 	markCopied(): void {
 		if (this.#closed || !this.isCopyable()) return;
 		this.#setCopied(true);
+		this.#rebuild();
+	}
+
+	/** Shows the answer's steering prompt as sent (send arrows, green), or back to pending when a send failed. */
+	setInjected(injected: boolean): void {
+		if (this.#closed || this.#injected === injected || this.getInjectText() === undefined) return;
+		this.#injected = injected;
 		this.#rebuild();
 	}
 
@@ -123,6 +157,32 @@ export class BtwPanelComponent extends OverlayPanel {
 		return this.#visibleAnswer;
 	}
 
+	/** The completed answer's steering prompt; undefined until a complete `<inject>` block exists. */
+	getInjectText(): string | undefined {
+		if (!this.isCopyable()) return undefined;
+		return getBtwInject(this.#answer);
+	}
+
+	/**
+	 * With `btw.inject` on, the answer around its `<inject>` block, which displays apart from
+	 * the prose only while streaming or once the tag closed: an unclosed block in a finished
+	 * answer cannot be sent, so it stays plain text.
+	 */
+	#injectParts(): BtwInjectParts | undefined {
+		const parts = this.#canInject ? splitBtwInject(this.#visibleAnswer) : undefined;
+		return parts && (parts.closed || this.#state === "running") ? parts : undefined;
+	}
+
+	/** The key hint shows only while a bound key can send the answer's steering prompt. */
+	#showsInjectKey(): boolean {
+		return (
+			this.#canInject?.() === true &&
+			!this.#injected &&
+			this.getInjectText() !== undefined &&
+			appBtwInjectKeys().length > 0
+		);
+	}
+
 	close(): void {
 		this.#closed = true;
 	}
@@ -135,8 +195,10 @@ export class BtwPanelComponent extends OverlayPanel {
 	override describe(): NativeNode {
 		const canFollowUp = this.#canFollowUp?.() ?? false;
 		const canBranch = this.#canBranch?.() ?? this.isBranchable();
+		const canInject = this.#showsInjectKey();
 		const memo = this.#native;
-		if (memo && memo.canFollowUp === canFollowUp && memo.canBranch === canBranch) return memo.node;
+		if (memo && memo.canFollowUp === canFollowUp && memo.canBranch === canBranch && memo.canInject === canInject)
+			return memo.node;
 		// Inline in the dock, styled as a sheet by role: a borderless column headed by the question.
 		// The command word is the accent; the rest of the heading is the question or arguments.
 		const space = this.#baseTitle.indexOf(" ");
@@ -148,12 +210,12 @@ export class BtwPanelComponent extends OverlayPanel {
 			...(live ? [node("spinner", {})] : []),
 			title,
 		]);
-		const described = col([head, this.#describeBody(), this.#describeFooter(canFollowUp, canBranch)], {
+		const described = col([head, this.#describeBody(), this.#describeFooter(canFollowUp, canBranch, canInject)], {
 			role: this.nativeRole,
 			gap: "sm",
 			tone: this.#state === "error" ? "error" : this.#state === "aborted" ? "warning" : undefined,
 		});
-		this.#native = { node: described, canFollowUp, canBranch };
+		this.#native = { node: described, canFollowUp, canBranch, canInject };
 		return described;
 	}
 
@@ -162,18 +224,33 @@ export class BtwPanelComponent extends OverlayPanel {
 			return text([span(sanitizeErrorLine(this.#errorMessage ?? "Unknown error"), "error")], { wrap: "word" });
 		}
 		const answer = this.#visibleAnswer;
-		if (answer) return md(answer, { stream: this.#state === "running" });
+		const parts = this.#injectParts();
+		const stream = this.#state === "running";
+		if (parts) {
+			const before = parts.before.trim();
+			const after = parts.after.trim();
+			return col(
+				[
+					...(before ? [md(before, { stream })] : []),
+					describeBtwInject(parts.inject, this.#injected),
+					...(after ? [md(after, { stream })] : []),
+				],
+				{ gap: "sm" },
+			);
+		}
+		if (answer) return md(answer, { stream });
 		const waiting = this.#state === "running" ? `${theme.status.pending} Waiting for response…` : "No text returned.";
 		return text([span(waiting, "dim")]);
 	}
 
-	#describeFooter(canFollowUp: boolean, canBranch: boolean): NativeNode {
+	#describeFooter(canFollowUp: boolean, canBranch: boolean, canInject: boolean): NativeNode {
 		const esc: NativeHint = { keys: boundKeys("app.interrupt", ["escape"]).slice(0, 1), label: "to close" };
 		switch (this.#state) {
 			case "running":
 				return hintsRow([{ ...esc, label: "to cancel" }]);
 			case "complete": {
 				const hints: NativeHint[] = [];
+				if (canInject) hints.push({ keys: appBtwInjectKeys().slice(0, 1), label: "to inject" });
 				if (this.isCopyable()) hints.push({ keys: ["c"], label: this.#copied ? "to copy again" : "to copy" });
 				if (canFollowUp) hints.push({ keys: ["f"], label: "to follow up" });
 				if (canBranch) hints.push({ keys: ["b"], label: "to branch" });
@@ -209,6 +286,7 @@ export class BtwPanelComponent extends OverlayPanel {
 			case "complete": {
 				const actions: string[] = [];
 				const copyKey = formatKeyHint("c");
+				if (this.#showsInjectKey()) actions.push(`${formatKeyHint(appBtwInjectKeys()[0]!)} to inject`);
 				if (this.isCopyable()) actions.push(this.#copied ? `${copyKey} to copy again` : `${copyKey} to copy`);
 				if (this.#canFollowUp?.()) actions.push(`${formatKeyHint("f")} to follow up`);
 				if (this.#canBranch?.() ?? this.isBranchable()) actions.push(`${formatKeyHint("b")} to branch`);
@@ -227,16 +305,25 @@ export class BtwPanelComponent extends OverlayPanel {
 		}
 	}
 
-	#contentComponent(): Component {
+	#contentSections(): Component[] {
 		if (this.#state === "error") {
-			return new Text(theme.fg("error", sanitizeErrorLine(this.#errorMessage ?? "Unknown error")), 0, 0);
+			return [new Text(theme.fg("error", sanitizeErrorLine(this.#errorMessage ?? "Unknown error")), 0, 0)];
 		}
 		const text = this.#visibleAnswer;
 		if (!text) {
 			const waiting =
 				this.#state === "running" ? `${theme.status.pending} Waiting for response…` : "No text returned.";
-			return new Text(theme.fg("dim", waiting), 0, 0);
+			return [new Text(theme.fg("dim", waiting), 0, 0)];
 		}
-		return new Markdown(text, 0, 0, getMarkdownTheme());
+		const parts = this.#injectParts();
+		if (!parts) return [new Markdown(text, 0, 0, getMarkdownTheme())];
+		// Separate sections: one blank row sets the block apart from the prose around it.
+		const before = parts.before.trim();
+		const after = parts.after.trim();
+		return [
+			...(before ? [new Markdown(before, 0, 0, getMarkdownTheme())] : []),
+			new BtwInjectBlock(parts.inject, this.#injected),
+			...(after ? [new Markdown(after, 0, 0, getMarkdownTheme())] : []),
+		];
 	}
 }
