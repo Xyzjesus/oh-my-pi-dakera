@@ -233,4 +233,54 @@ describe("tool result details with raw control sequences", () => {
 		expect(links).toEqual([pathToFileURL(first).href, pathToFileURL(second).href]);
 		expect(group.render(120).join("\n")).not.toContain(FILE_ESCAPES);
 	});
+
+	it("links a lone read of a URL on the folded row's head", () => {
+		const url = "https://example.com/docs";
+		const group = new ReadToolGroupComponent();
+		group.updateArgs({ path: url }, "u");
+		group.updateResult(
+			{ content: [{ type: "text", text: "needle" }], details: { displayContent: { text: LINE, startLine: 1 } } },
+			false,
+			"u",
+		);
+		const view = group.describe({
+			cols: 120,
+			reduceMotion: false,
+			dark: true,
+			supports: kind => kind === "tool",
+			feature: () => true,
+		});
+		if (view.k !== "tool") throw new Error("Expected read tool node");
+		expect(view.p?.target).toBe(url);
+		expect(view.p?.href).toBe(url);
+	});
+
+	it("links a grouped read of URLs to the URLs themselves", () => {
+		const urls = ["https://example.com/a", "http://example.com/b"];
+		const group = new ReadToolGroupComponent();
+		group.updateArgs({ path: urls.join("\n") }, "u");
+		group.updateResult(
+			{
+				content: [{ type: "text", text: "needle" }],
+				details: { displayReadTargets: urls, displayContent: { text: LINE, startLine: 1 } },
+			},
+			false,
+			"u",
+		);
+		const view = group.describe({
+			cols: 120,
+			reduceMotion: false,
+			dark: true,
+			supports: kind => kind === "tool",
+			feature: () => true,
+		});
+		if (view.k !== "tool") throw new Error("Expected read tool node");
+		const rows = (view.c ?? []).filter(child => "k" in child && child.k === "row");
+		const links = rows.flatMap(row =>
+			(row.c ?? []).flatMap(child =>
+				"k" in child && child.k === "text" ? (child.p?.spans ?? []).flatMap(span => span.href ?? []) : [],
+			),
+		);
+		expect(links).toEqual(urls);
+	});
 });

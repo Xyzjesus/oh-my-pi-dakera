@@ -28,6 +28,20 @@ export function fileHref(filePath: string | undefined): string | undefined {
 	return filePath && path.isAbsolute(filePath) ? tryFileUri(filePath) : undefined;
 }
 
+/**
+ * Link for a head target that is a web URL, else undefined.
+ *
+ * A `read` of a URL lands on the read card, whose path target is not a file:
+ * `fileHref` leaves it unlinked, so the URL a user is most likely to want to
+ * open showed as dead text in a Tern tool row. `www.` gains its scheme, since
+ * a linker needs an absolute one.
+ */
+export function urlHref(target: string | undefined): string | undefined {
+	if (!target) return undefined;
+	const candidate = /^www\./i.test(target) ? `https://${target}` : target;
+	return /^https?:\/\/\S+$/i.test(candidate) ? candidate : undefined;
+}
+
 /** Diff stats as one head `meta` string, `+8 −1` (U+2212 minus), or undefined when nothing changed. */
 export function diffStatsMeta(added: number, removed: number): string | undefined {
 	const parts: string[] = [];
