@@ -8827,9 +8827,11 @@ export class AgentSession implements SettingsScope {
 				);
 			}
 
-			// Validate API key
+			// Validate API key. A provider with no usable credential walks the
+			// configured retry fallback chain before the prompt fails.
 			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
-			if (!apiKey) {
+			if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
+				if (setupAbort.signal.aborted) return false;
 				throw new Error(
 					`No API key found for ${model.provider}.\n\n` +
 						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
