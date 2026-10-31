@@ -542,9 +542,13 @@ function mapWithBundledReference<TApi extends Api>(
 ): ModelSpec<TApi> {
 	const name = toModelName(entry.name, reference?.name ?? defaults.name);
 	if (!reference) {
+		const contextWindow = toPositiveNumber(entry.context_length, 0);
+		const maxTokens = toPositiveNumber(entry.max_completion_tokens, 0);
 		return {
 			...defaults,
 			name,
+			contextWindow: Number.isInteger(contextWindow) && contextWindow > 0 ? contextWindow : defaults.contextWindow,
+			maxTokens: Number.isInteger(maxTokens) && maxTokens > 0 ? maxTokens : defaults.maxTokens,
 		};
 	}
 	// Generic `/models` rows describe the chat roster. Do not make a bundled

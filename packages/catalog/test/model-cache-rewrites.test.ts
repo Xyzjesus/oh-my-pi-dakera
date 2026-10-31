@@ -70,6 +70,19 @@ describe("model cache write churn", () => {
 		}
 	});
 
+	it("rejects schema-v14 rows that lost provider-reported limits for unbundled models", () => {
+		const models = [buildModel({ ...spec("new-unbundled-model"), contextWindow: null, maxTokens: null })];
+		writeModelCache("rewrite-test", Date.now(), models, true, "fp", dbPath);
+		const db = new Database(dbPath);
+		try {
+			db.run("UPDATE model_cache SET version = 14 WHERE provider_id = ?", ["rewrite-test"]);
+		} finally {
+			db.close();
+		}
+
+		expect(readModelCache("rewrite-test", TTL_MS, Date.now, dbPath)).toBeNull();
+	});
+
 	it("advances freshness of an unchanged refresh without rewriting the payload row", () => {
 		const models = [model("a"), model("b")];
 		const before = payloadWrites();
