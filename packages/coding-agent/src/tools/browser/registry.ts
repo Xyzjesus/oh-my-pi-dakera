@@ -374,6 +374,11 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		if (subprocess) await gracefulKillTreeOnce(subprocess.pid);
 		throw new ToolError(`Connected to ${cdpUrl} but puppeteer.connect failed: ${(err as Error).message}`);
 	}
+	logger.debug("Attached to app browser", {
+		browser: path.basename(exe),
+		attachment: reused ? "existing" : "launched",
+		profile: appArgs.some(arg => arg.startsWith("--user-data-dir=")) ? "dedicated" : "application default",
+	});
 	return {
 		key: browserKey(kind),
 		kind,
