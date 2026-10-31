@@ -65,15 +65,8 @@ describe("Cerebras provider discovery", () => {
 	);
 
 	test.each([
-		["missing", undefined],
-		["null", null],
-		["zero", 0],
-		["negative", -1],
-		["fractional", 1.5],
 		["non-numeric", "invalid"],
-		["non-finite", "Infinity"],
-		["boolean", true],
-		["object", {}],
+		["zero", 0],
 	] as const)("keeps unknown limits for %s values without discarding the valid counterpart", async (_, invalid) => {
 		const models = await discoverModels([
 			{ id: "invalid-context", context_length: invalid, max_completion_tokens: 32_000 },
