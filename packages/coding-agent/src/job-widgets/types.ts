@@ -45,6 +45,8 @@ export interface JobWidgetBrief {
 	kind: "bash" | "task";
 	/** bash: the full command line. */
 	command?: string;
+	/** bash: seconds until the command is killed; absent when it has no timeout. */
+	timeoutSec?: number;
 	/** task: the assignment the subagent was given. */
 	task?: string;
 	/** The model's intent line on the call that started the job. */

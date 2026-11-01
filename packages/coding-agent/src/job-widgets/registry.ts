@@ -8,7 +8,7 @@ import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJob } from "../async/job-manager";
 import type { JobWidgetAuthor, JobWidgetAuthorRequest } from "./author";
-import { type JobCaptionWriter, needsJobCaption } from "./caption";
+import { type JobCaptionWriter, needsJobCaption, normalizeJobCaption } from "./caption";
 import { JobWidgetRuntime, sampleLines } from "./runtime";
 import { type JobWidgetSpec, jobWidgetSkip, validateJobWidgetSpec } from "./spec";
 import type { JobWidgetBrief, JobWidgetRegistry } from "./types";
@@ -263,17 +263,19 @@ export class JobWidgets implements JobWidgetRegistry {
 
 	/** Ask once for the caption of a shown command that needs explaining, once the job is old enough. */
 	#maybeCaption(entry: WidgetEntry, brief: JobWidgetBrief, now: number): void {
-		if (entry.captionAsked || !this.#captioner || brief.kind !== "bash" || !brief.command) return;
+		const command = brief.command;
+		if (entry.captionAsked || !this.#captioner || brief.kind !== "bash" || !command) return;
 		if (now - entry.job.startTime < this.#options.authorAfterMs || this.#inFlight >= this.#options.maxInFlight)
 			return;
 		entry.captionAsked = true;
-		if (needsJobCaption(brief.command)) void this.#writeCaption(entry, brief.command);
+		if (needsJobCaption(command)) void this.#writeCaption(entry, { ...brief, command });
 	}
 
-	async #writeCaption(entry: WidgetEntry, command: string): Promise<void> {
+	async #writeCaption(entry: WidgetEntry, brief: JobWidgetBrief & { command: string }): Promise<void> {
 		this.#inFlight += 1;
 		try {
-			entry.caption = await this.#captioner?.(command, entry.job.intent, this.#disposal.signal);
+			// Normalized here, so an injected writer's raw reply is as safe to render as the model's.
+			entry.caption = normalizeJobCaption((await this.#captioner?.(brief, this.#disposal.signal)) ?? "");
 			if (entry.caption) this.#notify();
 		} catch (error) {
 			if (!this.#disposed) logger.debug("Job caption failed", { jobId: entry.job.id, error: String(error) });

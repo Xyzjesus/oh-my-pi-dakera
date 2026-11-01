@@ -4,7 +4,7 @@ The reader already sees why the job was started. Your line adds what that leaves
 
 Reply with exactly one line: at most 12 words, plain English, no subject, no markdown, no quotes, no trailing period.
 
-- Lead with the duration or the end condition when the command decides it (a loop bound, a timeout, a single run). Work out totals: 40 rounds of `sleep 3` is about 2 min.
+- Lead with the duration or the end condition when the command decides it (a loop bound, a timeout, a single run). Work out totals: 40 rounds of `sleep 3` is about 2 min. The job is killed at its timeout: when that comes first, it is the end.
 - A loop that only waits or prints counters is a wait: say how long, not what it echoes.
 - Name the concrete things that matter: hosts, services, files, test suites, ports.
 - Never restate the stated purpose or name the shell ("Runs a bash command").

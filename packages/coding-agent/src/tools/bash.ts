@@ -1019,7 +1019,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				intent: options.intent,
 				widgetInputs: {
 					sources: () => [outputTap, ...pipeSources.list()],
-					brief: () => ({ kind: "bash", command: options.command, intent: options.intent }),
+					brief: () => ({
+						kind: "bash",
+						command: options.command,
+						timeoutSec: options.timeoutSec,
+						intent: options.intent,
+					}),
 				},
 			},
 		);

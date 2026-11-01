@@ -53,7 +53,7 @@ function startJob(manager: AsyncJobManager, label: string, intent?: string) {
 	};
 	const id = manager.register("bash", label, run, {
 		intent,
-		widgetInputs: { sources: () => [tap], brief: () => ({ kind: "bash", command: label }) },
+		widgetInputs: { sources: () => [tap], brief: () => ({ kind: "bash", command: label, intent }) },
 	});
 	const job = manager.getJob(id) as AsyncJob;
 	return { job, tap, finish: () => done.resolve("ok") };
@@ -303,9 +303,10 @@ describe("job widget registry", () => {
 			now: () => Date.now() + offset,
 			minIngestMs: 0,
 			enabled: () => enabled,
-			captioner: async (command, intent) => {
+			captioner: async ({ command, intent }) => {
 				calls.push([command, intent]);
-				return "Checks worker every 60s until the indexer stops";
+				// A raw reply: the registry keeps its first line as plain text.
+				return '- "Checks worker every 60s until the indexer stops."\nExtra';
 			},
 		});
 		const watch = startJob(

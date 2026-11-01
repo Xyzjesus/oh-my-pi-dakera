@@ -13,14 +13,15 @@ import { extractTextContent } from "../commit/utils";
 import systemPrompt from "../prompts/system/job-caption-system.md" with { type: "text" };
 import userPrompt from "../prompts/system/job-caption-user.md" with { type: "text" };
 import { type ModelJobWidgetAuthorOptions, redactWidgetSample, resolveWidgetModel } from "./author";
+import type { JobWidgetBrief } from "./types";
 
 /**
- * Writes the caption of a command started with `intent`; resolves
- * `undefined` when no model can write one or the reply holds no usable line.
+ * Writes the caption of a command's job from its brief (command, intent,
+ * timeout); resolves the raw reply, which the registry normalizes with
+ * {@link normalizeJobCaption}, or `undefined` when no model can write one.
  */
 export type JobCaptionWriter = (
-	command: string,
-	intent: string | undefined,
+	brief: JobWidgetBrief & { command: string },
 	signal: AbortSignal,
 ) => Promise<string | undefined>;
 
@@ -64,7 +65,7 @@ export function normalizeJobCaption(reply: string): string | undefined {
 
 /** A {@link JobCaptionWriter} backed by the `widget` model role. */
 export function createModelJobCaptionWriter(options: ModelJobWidgetAuthorOptions): JobCaptionWriter {
-	return async (command, intent, signal) => {
+	return async ({ command, intent, timeoutSec }, signal) => {
 		const sessionId = options.sessionId();
 		const model = await resolveWidgetModel(options.settings, options.modelRegistry, sessionId, signal);
 		if (!model) return undefined;
@@ -80,6 +81,7 @@ export function createModelJobCaptionWriter(options: ModelJobWidgetAuthorOptions
 					text: prompt.render(userPrompt, {
 						intent: intent ? truncate(redact(intent), MAX_INTENT_CHARS) : undefined,
 						command: truncate(redact(command.trim()), MAX_COMMAND_CHARS),
+						timeoutSec,
 					}),
 				},
 			],
@@ -103,6 +105,6 @@ export function createModelJobCaptionWriter(options: ModelJobWidgetAuthorOptions
 		if (response.stopReason === "error" || response.stopReason === "aborted") {
 			throw new Error(response.errorMessage ?? `job caption request ${response.stopReason}`);
 		}
-		return normalizeJobCaption(extractTextContent(response) ?? "");
+		return extractTextContent(response);
 	};
 }
