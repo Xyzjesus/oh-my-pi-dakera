@@ -515,6 +515,10 @@ fn delete_removes_extraneous_files() {
 	assert_eq!(run(&["-a", "src/", "dst/"], dir.path()).0, 0);
 	fs::write(dir.path().join("dst/extra"), b"gone").unwrap();
 	fs::create_dir(dir.path().join("dst/olddir")).unwrap();
+	// Adding the extras bumped dst's mtime; restore src's so only the deletions are itemized
+	// rather than also `.d..t...... ./` whenever the writes crossed a timestamp tick.
+	let src_mtime = fs::metadata(&src).unwrap().modified().unwrap();
+	fs::set_times_nofollow(dir.path().join("dst"), fs::FileTimes::new().set_modified(src_mtime)).unwrap();
 	let (code, out, err) = run(&["-ai", "--delete", "src/", "dst/"], dir.path());
 	assert_eq!((code, err.as_str()), (0, ""));
 	assert_eq!(out, "*deleting   olddir/\n*deleting   extra\n");
