@@ -3258,7 +3258,7 @@ describe("ModelRegistry runtime discovery", () => {
 		expect((await sendThroughStreamSimple(optional, {})).reasoning_effort).toBeUndefined();
 	});
 
-	test("openai-models-list discovery sends Ultrafast only to relay rows that advertise it", async () => {
+	test("openai-models-list discovery reads relay rows' advertised service tiers", async () => {
 		writeRawModelsJson({
 			"codex-relay": {
 				baseUrl: "http://127.0.0.1:9994",
@@ -3291,31 +3291,9 @@ describe("ModelRegistry runtime discovery", () => {
 		};
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
-		async function sentTier(id: string): Promise<unknown> {
-			const target = registry.find("codex-relay", id);
-			if (!target) throw new Error(`expected discovered route ${id}`);
-			let payload: Record<string, unknown> | undefined;
-			const fetch: FetchImpl = async (_input, init) => {
-				payload = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>;
-				const events = [
-					{ id: "chatcmpl-tier-fixture", choices: [{ index: 0, delta: { role: "assistant", content: "OK" } }] },
-					{ id: "chatcmpl-tier-fixture", choices: [{ index: 0, finish_reason: "stop", delta: {} }] },
-				];
-				const body = `${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\ndata: [DONE]\n\n`;
-				return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
-			};
-			await streamSimple(
-				target,
-				{ messages: [{ role: "user", content: "Reply with exactly OK.", timestamp: Date.now() }] },
-				{ apiKey: "TEST_KEY", fetch, serviceTier: "ultrafast" },
-			).result();
-			if (!payload) throw new Error("stream fixture did not make a request");
-			return payload.service_tier;
-		}
-		expect(await sentTier("gpt-6.1-sol")).toBe("ultrafast");
-		expect(await sentTier("gpt-6-astra")).toBe("ultrafast");
-		// A relay row that does not list Ultrafast must not receive it.
-		expect(await sentTier("gpt-6-sol")).toBeUndefined();
+		expect(registry.find("codex-relay", "gpt-6.1-sol")?.serviceTiers).toEqual(["priority", "ultrafast"]);
+		expect(registry.find("codex-relay", "gpt-6-astra")?.serviceTiers).toEqual(["ultrafast"]);
+		expect(registry.find("codex-relay", "gpt-6-sol")?.serviceTiers).toEqual(["priority"]);
 	});
 
 	test("openai-models-list discovery reads server-advertised input modalities for ids absent from the catalog", async () => {
