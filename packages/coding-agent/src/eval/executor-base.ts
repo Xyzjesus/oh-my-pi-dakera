@@ -78,6 +78,12 @@ export interface KernelExecutorBaseOptions {
 	bridgeSessionId?: string;
 	artifactId?: string;
 	artifactPath?: string;
+	/**
+	 * Set by the kernel session registry. Called once, when the cell starts on its
+	 * kernel: records that kernel as the one the caller has seen and returns true
+	 * when it replaced a kernel that died after the session's previous cell.
+	 */
+	claimKernelRestartNotice?: () => boolean;
 }
 
 /** Normalised execution result produced by {@link executeWithKernelBase}. */
@@ -96,6 +102,16 @@ export interface KernelExecutionResult {
 	outputBytes: number;
 	displayOutputs: EvalDisplayOutput[];
 	stdinRequested: boolean;
+}
+
+/**
+ * First line of a cell that runs on a replacement for a retained runtime that
+ * died after the session's previous cell. It reuses the wording of the
+ * `eval-state-context` reminder a rebuilt session gets, so an agent that knows
+ * one recognises the other.
+ */
+export function formatKernelRestartNotice(runtimeLabel: string): string {
+	return `Kernel restarted: the previous ${runtimeLabel} is dead; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
 }
 
 /** Minimal kernel surface the base executor drives, satisfied by every backend kernel. */
@@ -512,7 +528,12 @@ export async function executeWithKernelBase<
 				})
 			: null;
 
+	let restartNoticeClaimed = false;
 	try {
+		if (options?.claimKernelRestartNotice?.()) {
+			restartNoticeClaimed = true;
+			sink.push(`${formatKernelRestartNotice(`${errorLogLabel} kernel`)}\n`);
+		}
 		if (remainingMs !== undefined && remainingMs <= 0) {
 			throw new cancelledErrorClass(true);
 		}
@@ -589,30 +610,41 @@ export async function executeWithKernelBase<
 			stdinRequested: false,
 		};
 	} catch (err) {
-		if (isCancellationError(err, cancelledErrorClass) || abortShield.abortRequested || abortShield.signal?.aborted) {
-			const timedOut = abortShield.timedOut || isTimedOutCancellation(err, cancelledErrorClass, abortShield.signal);
-			const dumped = await sink.dump(
-				timedOut ? formatTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs) : undefined,
-			);
-			return {
-				exitCode: undefined,
-				cancelled: true,
-				truncated: dumped.truncated,
-				output: dumped.output,
-				artifactId: dumped.artifactId ?? undefined,
-				artifactElidedBytes: dumped.artifactElidedBytes,
-				artifactError: dumped.artifactError,
-				totalLines: dumped.totalLines,
-				totalBytes: dumped.totalBytes,
-				outputLines: dumped.outputLines,
-				outputBytes: dumped.outputBytes,
-				displayOutputs,
-				stdinRequested: false,
-			};
+		const cancelled =
+			isCancellationError(err, cancelledErrorClass) ||
+			abortShield.abortRequested ||
+			abortShield.signal?.aborted === true;
+		if (!cancelled) {
+			const error = err instanceof Error ? err : new Error(String(err));
+			logger.error(`${errorLogLabel} execution failed`, { error: error.message });
+			// The notice belongs to the restart, not to one delivery: the cell that
+			// claimed it returns it even when it fails, including when its output
+			// consumer throws. The sink stores each chunk before handing it to the
+			// consumer, so the result holds the notice and any output, then the error,
+			// which the consumer that failed is not handed again.
+			if (!restartNoticeClaimed) throw error;
+			sink.push(`${error.message}\n`, { emitInline: false });
 		}
-		const error = err instanceof Error ? err : new Error(String(err));
-		logger.error(`${errorLogLabel} execution failed`, { error: error.message });
-		throw error;
+		const timedOut =
+			cancelled && (abortShield.timedOut || isTimedOutCancellation(err, cancelledErrorClass, abortShield.signal));
+		const dumped = await sink.dump(
+			timedOut ? formatTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs) : undefined,
+		);
+		return {
+			exitCode: cancelled ? undefined : 1,
+			cancelled,
+			truncated: dumped.truncated,
+			output: dumped.output,
+			artifactId: dumped.artifactId ?? undefined,
+			artifactElidedBytes: dumped.artifactElidedBytes,
+			artifactError: dumped.artifactError,
+			totalLines: dumped.totalLines,
+			totalBytes: dumped.totalBytes,
+			outputLines: dumped.outputLines,
+			outputBytes: dumped.outputBytes,
+			displayOutputs,
+			stdinRequested: false,
+		};
 	} finally {
 		await sink.dispose();
 		unregisterBridge?.();

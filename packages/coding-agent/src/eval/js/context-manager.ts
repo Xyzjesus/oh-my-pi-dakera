@@ -12,7 +12,12 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
-import { attachSessionOwner, EvalKernelNotRunningError, type SessionOwners } from "../executor-base";
+import {
+	attachSessionOwner,
+	EvalKernelNotRunningError,
+	formatKernelRestartNotice,
+	type SessionOwners,
+} from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
 import { updateEvalState } from "../state";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
@@ -114,6 +119,10 @@ interface StartingJsSession extends SessionOwners {
 const sessions = new Map<string, JsSession>();
 const startingSessions = new Map<string, StartingJsSession>();
 const resettingSessions = new Map<string, Promise<void>>();
+// Session keys whose worker died outside reset and disposal (a worker error, or
+// an abort that killed it), with the owners it had. The next cell on the key
+// runs on a new worker and must say that earlier state is gone.
+const lostSessions = new Map<string, Pick<SessionOwners, "ownerIds">>();
 // Worker startup (module-graph import + WorkerCore construction) is infrastructure
 // cost, not user compute. Floor it independently of Bun's 5s default per-test timeout
 // so a slow cold-start under load isn't aborted mid-init — terminating a still-
@@ -200,6 +209,9 @@ export async function executeInVmContext(options: {
 		options.timeoutMs,
 		options.ownerId,
 	);
+	if (!options.reset && lostSessions.delete(sessionKey)) {
+		options.runState.onText?.(`${formatKernelRestartNotice("JS worker")}\n`);
+	}
 	const result = await runOnce(session, options);
 	if (session.state === "alive" && path.isAbsolute(options.filename)) {
 		updateEvalState(options.session, {
@@ -384,6 +396,7 @@ export async function runIfSnapshotMatches(options: {
 }
 
 export async function resetVmContext(sessionKey: string): Promise<void> {
+	lostSessions.delete(sessionKey);
 	const session = sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
 	if (!session) return;
 	sessions.delete(sessionKey);
@@ -400,6 +413,8 @@ export async function disposeAllVmContexts(): Promise<void> {
 		if (!all.includes(result.value)) all.push(result.value);
 	}
 	sessions.clear();
+	// After the await: a worker that died while startups settled marked its key lost.
+	lostSessions.clear();
 	await Promise.all(all.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })));
 }
 
@@ -426,6 +441,11 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 			continue;
 		}
 		starting.ownerIds.delete(ownerId);
+	}
+	for (const [sessionKey, lost] of Array.from(lostSessions.entries())) {
+		if (!lost.ownerIds.has(ownerId)) continue;
+		if (lost.ownerIds.size === 1) lostSessions.delete(sessionKey);
+		else lost.ownerIds.delete(ownerId);
 	}
 	for (const session of toKill) {
 		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
@@ -867,6 +887,7 @@ function settlePending(session: JsSession, msg: Extract<WorkerOutbound, { type: 
 async function killSessionFor(session: JsSession, error: Error, options: { force: boolean }): Promise<void> {
 	if (sessions.get(session.sessionKey) === session) {
 		sessions.delete(session.sessionKey);
+		lostSessions.set(session.sessionKey, { ownerIds: new Set(session.ownerIds) });
 	}
 	await killSession(session, error, options);
 }

@@ -142,6 +142,14 @@ export function createKernelSessionRegistry<
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
 	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
+	// The kernel each session record's latest cell started on. A cell that starts
+	// on a different live kernel runs on a replacement for one that died in
+	// between and carries the notice; the executor keeps it in that cell's result
+	// even when the cell fails, so it is never handed back. A cell that fails
+	// before it starts (prelude setup, cancellation) claims nothing, so the notice
+	// goes to the first cell that does start. Reset and disposal make a new
+	// record, so they never look like a restart.
+	const servedKernels = new WeakMap<TSession, TKernel>();
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
 		sessions,
@@ -355,6 +363,8 @@ export function createKernelSessionRegistry<
 				cwd: session.cwd,
 				reason,
 			});
+			// Intentional disposal: a later replacement of this kernel is no surprise restart.
+			servedKernels.delete(session);
 			if (!sessions.has(id)) sessions.set(id, session);
 		}
 	}
@@ -408,6 +418,7 @@ export function createKernelSessionRegistry<
 				cwd: session.cwd,
 				reason,
 			});
+			servedKernels.delete(session);
 			if (!sessions.has(session.sessionKey)) sessions.set(session.sessionKey, session);
 		}
 	}
@@ -454,7 +465,12 @@ export function createKernelSessionRegistry<
 		const kernel = await acquireLiveSessionKernel(session, cwd, options);
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
 		throwIfCallerCancelled(options);
-		const runOptions = { ...options, cwd };
+		const claimKernelRestartNotice = (): boolean => {
+			const previous = servedKernels.get(session);
+			servedKernels.set(session, kernel);
+			return previous !== undefined && previous !== kernel;
+		};
+		const runOptions = { ...options, cwd, claimKernelRestartNotice };
 		let result: R;
 		try {
 			result = await descriptor.executeWithKernel(kernel, code, runOptions);
