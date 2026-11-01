@@ -6,7 +6,6 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-sto
 import { LoginCancelledError } from "@oh-my-pi/pi-ai/error";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const SIGN_IN_URL = "https://console.mistral.ai/api/vibe/sign-in";
@@ -51,6 +50,15 @@ function mockConsole(polls: (Response | Error)[], exchange: () => Response = () 
 	return { calls, fetchImpl };
 }
 
+/** Skip poll waits and record the delays the shared poll loop asked for (signal-less logins sleep via `Bun.sleep`). */
+function instantPollWaits(): number[] {
+	const delays: number[] = [];
+	vi.spyOn(Bun, "sleep").mockImplementation((async (ms: number) => {
+		delays.push(ms);
+	}) as typeof Bun.sleep);
+	return delays;
+}
+
 describe("mistral vibe browser sign-in", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -62,14 +70,14 @@ describe("mistral vibe browser sign-in", () => {
 			json({ status: "completed", exchange_token: "xt-1" }),
 		]);
 		const onAuth = vi.fn();
-		const sleep = vi.spyOn(piUtils, "sleepLong").mockResolvedValue(undefined);
+		const waits = instantPollWaits();
 
 		const result = await loginMistral({ onAuth, fetch: fetchImpl });
 
 		expect(result).toBe("vibe-key");
 		expect(onAuth).toHaveBeenCalledTimes(1);
 		expect(onAuth.mock.calls[0]?.[0]).toMatchObject({ url: BROWSER_URL });
-		expect(sleep).toHaveBeenCalledTimes(1);
+		expect(waits).toEqual([3000]);
 
 		const start = JSON.parse(String(calls[0]?.init?.body));
 		expect(start.code_challenge_method).toBe("S256");
@@ -102,7 +110,7 @@ describe("mistral vibe browser sign-in", () => {
 			json({ detail: "upstream" }, 502),
 			json({ status: "completed", exchange_token: "xt-1" }),
 		]);
-		vi.spyOn(piUtils, "sleepLong").mockResolvedValue(undefined);
+		instantPollWaits();
 
 		await expect(loginMistral({ fetch: fetchImpl })).resolves.toBe("vibe-key");
 		expect(calls.filter(call => call.url === POLL_URL)).toHaveLength(3);
@@ -117,10 +125,24 @@ describe("mistral vibe browser sign-in", () => {
 			throttled(),
 			json({ status: "completed", exchange_token: "xt-1" }),
 		]);
-		const sleep = vi.spyOn(piUtils, "sleepLong").mockResolvedValue(undefined);
+		const waits = instantPollWaits();
 
 		await expect(loginMistral({ fetch: fetchImpl })).resolves.toBe("vibe-key");
-		expect(sleep.mock.calls.map(call => call[0])).toEqual([7000, 7000, 7000, 7000]);
+		expect(waits).toEqual([7000, 7000, 7000, 7000]);
+	});
+
+	it("never polls faster than the base cadence after a short Retry-After, and caps a long one", async () => {
+		const { fetchImpl } = mockConsole([
+			new Response(null, { status: 429, headers: { "retry-after-ms": "50" } }),
+			json({ status: "pending" }),
+			new Response(null, { status: 429, headers: { "Retry-After": "600" } }),
+			json({ status: "pending" }),
+			json({ status: "completed", exchange_token: "xt-1" }),
+		]);
+		const waits = instantPollWaits();
+
+		await expect(loginMistral({ fetch: fetchImpl })).resolves.toBe("vibe-key");
+		expect(waits).toEqual([3000, 3000, 30_000, 30_000]);
 	});
 
 	it("gives up after three consecutive poll failures without exchanging", async () => {
@@ -130,7 +152,7 @@ describe("mistral vibe browser sign-in", () => {
 			json({}, 503),
 			json({ status: "completed", exchange_token: "xt-1" }),
 		]);
-		vi.spyOn(piUtils, "sleepLong").mockResolvedValue(undefined);
+		instantPollWaits();
 
 		await expect(loginMistral({ fetch: fetchImpl })).rejects.toThrow("HTTP 503");
 		expect(calls.some(call => call.url === EXCHANGE_URL)).toBe(false);
@@ -188,19 +210,21 @@ describe("mistral vibe browser sign-in", () => {
 	it("cancels the wait between polls through the login signal", async () => {
 		const { calls, fetchImpl } = mockConsole([json({ status: "pending" })]);
 		const controller = new AbortController();
-		const realSleep = piUtils.sleepLong;
-		// Abort while the poll wait is in progress; the real sleep must observe the signal.
-		const sleep = vi.spyOn(piUtils, "sleepLong").mockImplementation((ms, signal) => {
-			controller.abort();
-			return realSleep(ms, signal);
-		});
+		const realSetTimeout = globalThis.setTimeout;
+		// Abort once the poll wait has started (after its abort listener is attached);
+		// the real 3 s timer must not hold the rejection.
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, ms?: number) => {
+			queueMicrotask(() => controller.abort());
+			return realSetTimeout(callback, ms);
+		}) as typeof setTimeout);
+		const started = Date.now();
 
 		await expect(loginMistral({ fetch: fetchImpl, signal: controller.signal })).rejects.toBeInstanceOf(
 			LoginCancelledError,
 		);
-		expect(sleep.mock.calls[0]?.[1]).toBe(controller.signal);
+		expect(Date.now() - started).toBeLessThan(1000);
 		expect(calls.map(call => call.url)).toEqual([SIGN_IN_URL, POLL_URL]);
-		expect(calls[1]?.init?.signal).toBe(controller.signal);
+		expect(calls[1]?.init?.signal?.aborted).toBe(true);
 	});
 });
 

@@ -12,7 +12,11 @@ const SLOW_DOWN_INTERVAL_INCREMENT_MS = 5000;
 export type OAuthDeviceCodePollResult<T> =
 	| { status: "complete"; value: T }
 	| { status: "pending" }
-	| { status: "slow_down" }
+	/**
+	 * Provider asked to poll less often. Without `retryAfterMs` the interval grows by five
+	 * seconds (RFC 8628); with it the interval becomes at least that long. Never shrinks.
+	 */
+	| { status: "slow_down"; retryAfterMs?: number }
 	| { status: "failed"; message: string };
 
 /** Options for polling an RFC 8628-style OAuth device-code flow. */
@@ -90,7 +94,12 @@ export async function pollOAuthDeviceCodeFlow<T>(options: OAuthDeviceCodeFlowOpt
 		}
 		if (result.status === "slow_down") {
 			slowDownResponses += 1;
-			intervalMs = Math.max(MINIMUM_DEVICE_FLOW_INTERVAL_MS, intervalMs + SLOW_DOWN_INTERVAL_INCREMENT_MS);
+			intervalMs = Math.max(
+				MINIMUM_DEVICE_FLOW_INTERVAL_MS,
+				result.retryAfterMs === undefined
+					? intervalMs + SLOW_DOWN_INTERVAL_INCREMENT_MS
+					: Math.max(intervalMs, result.retryAfterMs),
+			);
 		}
 
 		const remainingMs = deadline - Date.now();
