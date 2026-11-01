@@ -1,0 +1,52 @@
+import { describe, expect, it } from "bun:test";
+
+async function runHost(source: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+	const child = Bun.spawn([process.execPath, "-e", source], {
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [exitCode, stdout, stderr] = await Promise.all([
+		child.exited,
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+	]);
+	return { exitCode, stdout, stderr };
+}
+
+describe("SDK import process ownership", () => {
+	it.skipIf(process.platform === "win32")("lets the embedding host finish its SIGTERM shutdown", async () => {
+		// Real signal delivery and an asynchronous stop must overlap the installed handler's exit.
+		const result = await runHost(`
+			process.on("SIGTERM", async () => {
+				await Bun.sleep(100);
+				process.stdout.write("host stopped cleanly\\n");
+				process.exit(0);
+			});
+			// Dynamic import tests the host's process listener before the SDK dependency graph evaluates.
+			await import("@oh-my-pi/pi-catalog");
+			process.kill(process.pid, "SIGTERM");
+		`);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain("host stopped cleanly");
+	});
+
+	it("leaves unrelated unhandled rejections to the embedding host", async () => {
+		// The delay exposes an OMP fatal handler racing the host's asynchronous rejection handling.
+		const result = await runHost(`
+			process.on("unhandledRejection", async () => {
+				await Bun.sleep(100);
+				process.stdout.write("host handled rejection\\n");
+				process.exit(0);
+			});
+			// Dynamic import preserves the host-before-SDK order.
+			await import("@oh-my-pi/pi-coding-agent");
+			Promise.reject(new Error("host failure"));
+			await Bun.sleep(1000);
+		`);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain("host handled rejection");
+		expect(result.stderr).not.toContain("[Unhandled Rejection]");
+	});
+});

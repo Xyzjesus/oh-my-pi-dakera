@@ -307,9 +307,7 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 	return cleanupPromise;
 }
 
-// Register signal and error event handlers to trigger cleanup before exit.
-// Main thread: full signal handling (SIGINT, SIGTERM, SIGHUP) + exceptions + exit
-// Worker thread: exit only (workers use self.addEventListener for exceptions)
+// CLI-owned main threads handle signals and fatal errors; workers handle exit only.
 let inspectorOpened = false;
 
 /** Origin of an EPIPE raised by a process communication channel. */
@@ -685,7 +683,20 @@ export async function fatal(error: unknown): Promise<never> {
 	return exitAfterFatal(report, "Fatal error", err, Reason.UNHANDLED_REJECTION);
 }
 
-if (Bun.isMainThread) {
+let processHandlersInstalled = false;
+
+/** Installs OMP's process-wide shutdown and fatal handlers for a CLI-owned process. */
+export function installProcessHandlers(): void {
+	if (processHandlersInstalled) return;
+	processHandlersInstalled = true;
+	if (!Bun.isMainThread) {
+		// Workers only run synchronous cleanup on exit; their own error listeners report failures to the parent.
+		process.on("exit", () => {
+			void runCleanup(Reason.EXIT);
+		});
+		return;
+	}
+
 	process
 		.on("SIGINT", async () => {
 			await runCleanup(Reason.SIGINT);
@@ -777,14 +788,6 @@ if (Bun.isMainThread) {
 			await runCleanup(Reason.SIGHUP);
 			exitProcess(129); // 128 + SIGHUP (1)
 		});
-} else {
-	// Worker thread: only register exit handler for cleanup.
-	// DO NOT register uncaughtException/unhandledRejection handlers here -
-	// they would swallow errors before the worker's own handlers (self.addEventListener)
-	// can report failures back to the parent thread.
-	process.on("exit", () => {
-		void runCleanup(Reason.EXIT);
-	});
 }
 
 /** Controls when a registered cleanup callback participates in cleanup passes. */
@@ -811,8 +814,7 @@ export interface CleanupRegistrationOptions {
 }
 
 /**
- * Registers a cleanup callback for shutdown, signals, fatal errors, and
- * repeatable manual cleanup passes.
+ * Registers a cleanup callback for manual passes and, when installed, process shutdown.
  *
  * Registrations persist across keep-alive {@link cleanup} passes and run at
  * most once per pass. Set `exitOnly` for resources the continuing process still

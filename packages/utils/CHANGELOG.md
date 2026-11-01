@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Importing pi-utils no longer installs process-wide signal and fatal handlers in embedding hosts ([#17674](https://github.com/can1357/oh-my-pi/issues/17674)).
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
