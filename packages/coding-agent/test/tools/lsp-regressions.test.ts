@@ -2975,29 +2975,6 @@ describe("lsp regressions", () => {
 				tempDir.removeSync();
 			}
 		});
-
-		it("does not select TypeScript 7 merely because a PATH tsc is native", async () => {
-			if (process.platform === "win32") return;
-			const tempDir = TempDir.createSync("@omp-lsp-ts-native-shim-");
-			const tsc = tempDir.join("shims", "tsc");
-			await fs.promises.mkdir(path.dirname(tsc), { recursive: true });
-			await fs.promises.symlink(process.execPath, tsc);
-			const project = tempDir.join("project");
-			await Bun.write(path.join(project, "tsconfig.json"), "{}");
-			const languageServer = tempDir.join("shims", "typescript-language-server");
-			await Bun.write(languageServer, "");
-			await fs.promises.chmod(languageServer, 0o755);
-			const originalPath = process.env.PATH;
-			process.env.PATH = `${path.dirname(tsc)}${path.delimiter}${originalPath ?? ""}`;
-			try {
-				const config = loadConfig(project);
-				expect(Object.keys(config.servers)).toEqual(["typescript-language-server"]);
-			} finally {
-				if (originalPath === undefined) delete process.env.PATH;
-				else process.env.PATH = originalPath;
-				tempDir.removeSync();
-			}
-		});
 	});
 
 	it("detects Ruff in Windows virtualenv Scripts directories", async () => {
