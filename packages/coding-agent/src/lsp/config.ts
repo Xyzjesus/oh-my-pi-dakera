@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { $which, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
+import { $which, isNativeExecutableSync, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import type { ClaudePluginRoot } from "../discovery/helpers";
 import {
@@ -339,11 +339,13 @@ function typescriptPackageDir(tscPath: string): string | null {
  * Whether the `tsc` at `tscPath` speaks LSP itself. TypeScript 7 dropped the JS
  * `lib/tsserver.js` that typescript-language-server wraps and exposes
  * `tsc --lsp --stdio` from its native binary instead; older releases reject the
- * flag with TS5023.
+ * flag with TS5023. Every pre-7 `tsc` is a Node script, so a native executable
+ * outside an npm layout (e.g. nixpkgs' static `bin/tsc`) is TypeScript 7+.
  */
 function typescriptSpeaksLsp(tscPath: string): boolean {
 	const packageDir = typescriptPackageDir(tscPath);
-	return packageDir !== null && !fs.existsSync(path.join(packageDir, "lib", "tsserver.js"));
+	if (packageDir === null) return isNativeExecutableSync(tscPath);
+	return !fs.existsSync(path.join(packageDir, "lib", "tsserver.js"));
 }
 
 /**

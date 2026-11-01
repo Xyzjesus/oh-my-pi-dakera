@@ -18,6 +18,7 @@ import {
 	getProjectDir,
 	isCompiledBinary,
 	isEnoent,
+	isNativeExecutable,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -1084,23 +1085,6 @@ async function reportedVersionAtPath(binaryPath: string): Promise<string | undef
 	} catch {
 		return undefined;
 	}
-}
-
-/** Whether `filePath` starts like an ELF, PE, or Mach-O executable rather than a script. */
-async function isNativeExecutable(filePath: string): Promise<boolean> {
-	const head = Buffer.alloc(4);
-	try {
-		const file = await fs.promises.open(filePath, "r");
-		try {
-			if ((await file.read(head, 0, 4, 0)).bytesRead < 4) return false;
-		} finally {
-			await file.close();
-		}
-	} catch {
-		return false;
-	}
-	if (head.toString("latin1") === "\x7fELF" || head.toString("latin1", 0, 2) === "MZ") return true;
-	return [0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe].includes(head.readUInt32BE(0));
 }
 
 /**

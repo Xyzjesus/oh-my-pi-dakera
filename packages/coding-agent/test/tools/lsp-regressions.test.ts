@@ -2953,6 +2953,25 @@ describe("lsp regressions", () => {
 				tempDir.removeSync();
 			}
 		});
+
+		it("prefers tsc --lsp for a native tsc outside any npm layout", async () => {
+			// #17659: nixpkgs ships TypeScript 7 as a static `bin/tsc` with no package.json.
+			const tempDir = TempDir.createSync("@omp-lsp-ts7-native-");
+			const tsc = path.join(tempDir.path(), "store", "typescript-7.0.2", "bin", "tsc");
+			await Bun.write(tsc, new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]));
+			await fs.promises.chmod(tsc, 0o755);
+			const project = tempDir.join("project");
+			await Bun.write(path.join(project, "tsconfig.json"), "{}");
+			vi.spyOn(Bun, "which").mockImplementation(command => (command === "tsc" ? tsc : null));
+			try {
+				const config = loadConfig(project);
+				expect(Object.keys(config.servers)).toEqual(["typescript-native"]);
+				expect(config.servers["typescript-native"]?.resolvedCommand).toBe(tsc);
+			} finally {
+				vi.restoreAllMocks();
+				tempDir.removeSync();
+			}
+		});
 	});
 
 	it("detects Ruff in Windows virtualenv Scripts directories", async () => {
