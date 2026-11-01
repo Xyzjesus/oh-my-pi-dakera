@@ -5,6 +5,7 @@
  * every regex compiles, every field a block reads is fed by a rule, and the
  * rules match the samples the author saw.
  */
+import { type } from "@oh-my-pi/omptype";
 import { LineMatcher } from "@oh-my-pi/pi-natives";
 import type { TspTone } from "@oh-my-pi/pi-wire";
 import { isRecord, truncate } from "@oh-my-pi/pi-utils";
@@ -168,22 +169,53 @@ const SOURCE_ID = /^(?:\*|[A-Za-z0-9_:.-]{1,64}\*?)$/;
 /** Named groups in both Rust spellings: `(?P<name>…)` and `(?<name>…)`. */
 const NAMED_GROUP = /\(\?P?<([A-Za-z_][A-Za-z0-9_]*)>/g;
 
-const STRING = { type: "string" } as const;
-const NUMBER = { type: "number" } as const;
-const BETTER = { enum: ["higher", "lower"] } as const;
-const VALUE_REF_SCHEMA = {
-	type: "object",
-	required: ["field", "agg"],
-	properties: {
-		field: STRING,
-		agg: { enum: JOB_WIDGET_AGGS },
-		label: STRING,
-		key: STRING,
-		unit: STRING,
-		digits: { type: "integer" },
-		better: BETTER,
-	},
-} as const;
+const Agg = type.enumerated(...JOB_WIDGET_AGGS);
+const Better = type.enumerated("higher", "lower");
+const ValueRefShape = type({
+	field: "string",
+	agg: Agg,
+	"label?": "string",
+	"key?": "string <= 120",
+	"unit?": "string",
+	"digits?": "0 <= number.integer <= 4",
+	"better?": Better,
+});
+const RuleShape = type({
+	from: "string",
+	match: `string <= ${MAX_PATTERN_CHARS}`,
+	"key?": "string",
+	"text?": "string",
+	"count?": "string",
+	"scale?": "number",
+});
+const BlockShape = type({
+	kind: type.enumerated("spark", "bars", "meter", "stat", "grid", "text"),
+	"field?": "string",
+	"label?": "string",
+	"key?": "string <= 120",
+	"agg?": Agg,
+	"unit?": "string",
+	"better?": Better,
+	"target?": "number",
+	"targetLabel?": "string",
+	"min?": "number",
+	"max?": "number",
+	// A string total (`"?"`, `"42"`) is read leniently; see `parseBlock`.
+	"total?": type("number").or(ValueRefShape).or("string"),
+	"items?": ValueRefShape.array().atLeastLength(1).atMostLength(MAX_STAT_ITEMS),
+	"tones?": type({ "[string]": type.enumerated(...JOB_WIDGET_TONES) }),
+});
+const SpecShape = type({
+	"skip?": "string",
+	"title?": "string",
+	"rules?": RuleShape.array().atLeastLength(1).atMostLength(MAX_RULES),
+	"blocks?": BlockShape.array().atLeastLength(1).atMostLength(MAX_BLOCKS),
+	"headline?": ValueRefShape,
+	"stage?": "string",
+});
+type ValueRefShape = typeof ValueRefShape.infer;
+type RuleShape = typeof RuleShape.infer;
+type BlockShape = typeof BlockShape.infer;
 
 /**
  * JSON schema of {@link JobWidgetSpec}, carried by the forced `respond` tool
@@ -194,46 +226,7 @@ const VALUE_REF_SCHEMA = {
  * ({@link jobWidgetSkip}); every other answer must carry `title`, `rules`
  * and `blocks`, which validation enforces.
  */
-export const JOB_WIDGET_SPEC_SCHEMA: Record<string, unknown> = {
-	type: "object",
-	properties: {
-		skip: STRING,
-		title: STRING,
-		rules: {
-			type: "array",
-			items: {
-				type: "object",
-				required: ["from", "match"],
-				properties: { from: STRING, match: STRING, key: STRING, text: STRING, count: STRING, scale: NUMBER },
-			},
-		},
-		blocks: {
-			type: "array",
-			items: {
-				type: "object",
-				required: ["kind"],
-				properties: {
-					kind: { enum: ["spark", "bars", "meter", "stat", "grid", "text"] },
-					field: STRING,
-					label: STRING,
-					key: STRING,
-					agg: { enum: JOB_WIDGET_AGGS },
-					unit: STRING,
-					better: BETTER,
-					target: NUMBER,
-					targetLabel: STRING,
-					min: NUMBER,
-					max: NUMBER,
-					total: { anyOf: [NUMBER, VALUE_REF_SCHEMA] },
-					items: { type: "array", items: VALUE_REF_SCHEMA },
-					tones: { type: "object", additionalProperties: { enum: JOB_WIDGET_TONES } },
-				},
-			},
-		},
-		headline: VALUE_REF_SCHEMA,
-		stage: STRING,
-	},
-};
+export const JOB_WIDGET_SPEC_SCHEMA: Record<string, unknown> = SpecShape.toJsonSchema();
 
 /** Lines the author saw for one source, for the validation dry run. */
 export interface JobWidgetSampleLines {
@@ -570,27 +563,35 @@ function checkReferences(spec: JobWidgetSpec, errors: string[]): Map<string, str
 
 // ── Structural parsing ──────────────────────────────────────────────────────
 
+/** Authors send `null` for an omitted optional; it reads as absent, as does an explicit `undefined`. */
+function withoutNulls(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(withoutNulls);
+	if (!isRecord(value)) return value;
+	const out: Record<string, unknown> = {};
+	for (const key in value) {
+		if (value[key] != null) out[key] = withoutNulls(value[key]);
+	}
+	return out;
+}
+
 function parseSpec(value: unknown, errors: string[]): JobWidgetSpec | undefined {
-	if (!isRecord(value)) {
-		errors.push("spec: expected an object");
+	const shape = SpecShape(withoutNulls(value));
+	if (shape instanceof type.errors) {
+		for (const issue of shape) errors.push(issue.path.length > 0 ? issue.message : `spec ${issue.message}`);
 		return undefined;
 	}
-	const title = str(value.title, "title", errors, { cut: MAX_TITLE_CHARS, required: true });
-	const rules = list(value.rules, "rules", errors, 1, MAX_RULES)?.map((rule, index) =>
-		parseRule(rule, `rules[${index}]`, errors),
-	);
-	const blocks = list(value.blocks, "blocks", errors, 1, MAX_BLOCKS)?.map((block, index) =>
-		parseBlock(block, `blocks[${index}]`, errors),
-	);
+	const title = text(shape.title, "title", errors, { cut: MAX_TITLE_CHARS, required: true });
+	if (!shape.rules) errors.push("rules: required");
+	if (!shape.blocks) errors.push("blocks: required");
+	const rules = shape.rules?.map((rule, index) => parseRule(rule, `rules[${index}]`, errors));
+	const blocks = shape.blocks?.map((block, index) => parseBlock(block, `blocks[${index}]`, errors));
 	let headline: JobWidgetSpec["headline"];
-	if (value.headline !== undefined) {
-		const ref = parseValueRef(value.headline, "headline", errors);
-		const label = isRecord(value.headline)
-			? str(value.headline.label, "headline.label", errors, { cut: MAX_LABEL_CHARS })
-			: undefined;
+	if (shape.headline) {
+		const ref = parseValueRef(shape.headline, "headline", errors);
+		const label = text(shape.headline.label, "headline.label", errors, { cut: MAX_LABEL_CHARS });
 		if (ref) headline = label ? { ...ref, label } : ref;
 	}
-	const stage = value.stage === undefined ? undefined : fieldName(value.stage, "stage", errors);
+	const stage = shape.stage === undefined ? undefined : fieldName(shape.stage, "stage", errors);
 	if (errors.length > 0 || title === undefined || !rules || !blocks) return undefined;
 	if (rules.some(rule => !rule) || blocks.some(block => !block)) return undefined;
 	return {
@@ -602,23 +603,18 @@ function parseSpec(value: unknown, errors: string[]): JobWidgetSpec | undefined 
 	};
 }
 
-function parseRule(value: unknown, where: string, errors: string[]): JobWidgetRule | undefined {
-	if (!isRecord(value)) {
-		errors.push(`${where}: expected an object`);
-		return undefined;
-	}
-	const from = str(value.from, `${where}.from`, errors, { required: true });
+function parseRule(rule: RuleShape, where: string, errors: string[]): JobWidgetRule | undefined {
+	const from = text(rule.from, `${where}.from`, errors, { required: true });
 	if (from !== undefined && !SOURCE_ID.test(from)) errors.push(`${where}.from: invalid source id "${from}"`);
-	const match = str(value.match, `${where}.match`, errors, { required: true, max: MAX_PATTERN_CHARS });
+	const match = text(rule.match, `${where}.match`, errors, { required: true });
 	const group = (name: "key" | "text"): string | undefined => {
-		const raw = str(value[name], `${where}.${name}`, errors);
+		const raw = text(rule[name], `${where}.${name}`, errors);
 		if (raw !== undefined && !GROUP_NAME.test(raw)) errors.push(`${where}.${name}: invalid group name "${raw}"`);
 		return raw;
 	};
 	const key = group("key");
-	const text = group("text");
-	const count = value.count === undefined ? undefined : fieldName(value.count, `${where}.count`, errors);
-	const scale = num(value.scale, `${where}.scale`, errors);
+	const textName = group("text");
+	const count = rule.count === undefined ? undefined : fieldName(rule.count, `${where}.count`, errors);
 	if (from === undefined || match === undefined) return undefined;
 	// `key` and `text` name groups of the pattern; authors often name ones it lacks. A `text` on
 	// a pattern with no groups at all means the matched text itself (`^(?:Installing|Building)`):
@@ -626,93 +622,84 @@ function parseRule(value: unknown, where: string, errors: string[]): JobWidgetRu
 	// Otherwise the role is dropped: a block reading the missing field (or needing keys) still
 	// fails validation and goes back to the author, and a spec that never reads it stays usable.
 	const groups = patternGroupNames(match);
-	const wrap = text !== undefined && FIELD_NAME.test(text) && groups.size === 0;
+	const wrap = textName !== undefined && FIELD_NAME.test(textName) && groups.size === 0;
 	const keyGroup = key !== undefined && groups.has(key) ? key : undefined;
-	const textGroup = text !== undefined && (wrap || groups.has(text)) ? text : undefined;
+	const textGroup = textName !== undefined && (wrap || groups.has(textName)) ? textName : undefined;
 	return {
 		from,
-		match: wrap ? `(?P<${text}>${match})` : match,
+		match: wrap ? `(?P<${textName}>${match})` : match,
 		...(keyGroup !== undefined ? { key: keyGroup } : {}),
 		...(textGroup !== undefined ? { text: textGroup } : {}),
 		...(count !== undefined ? { count } : {}),
-		...(scale !== undefined ? { scale } : {}),
+		...(rule.scale !== undefined ? { scale: rule.scale } : {}),
 	};
 }
 
-function parseValueRef(value: unknown, where: string, errors: string[]): JobWidgetValueRef | undefined {
-	if (!isRecord(value)) {
-		errors.push(`${where}: expected an object`);
-		return undefined;
-	}
-	const field = fieldName(value.field, `${where}.field`, errors);
-	const key = str(value.key, `${where}.key`, errors, { max: 120 });
-	const agg = aggregation(value.agg, `${where}.agg`, errors, true);
-	const unit = str(value.unit, `${where}.unit`, errors, { cut: MAX_UNIT_CHARS });
-	const digits = num(value.digits, `${where}.digits`, errors);
-	if (digits !== undefined && (!Number.isInteger(digits) || digits < 0 || digits > 4)) {
-		errors.push(`${where}.digits: expected an integer 0–4`);
-	}
-	const better = betterValue(value.better, `${where}.better`, errors);
+/** The value-ref fields of a ref, or of a meter block read as one. */
+type ValueRefInput = Pick<ValueRefShape, "key" | "unit" | "digits" | "better"> & { field?: string; agg?: JobWidgetAgg };
+
+function parseValueRef(ref: ValueRefInput, where: string, errors: string[]): JobWidgetValueRef | undefined {
+	const field = fieldName(ref.field, `${where}.field`, errors);
+	const agg = requiredAgg(ref.agg, `${where}.agg`, errors);
+	const key = text(ref.key, `${where}.key`, errors);
+	const unit = text(ref.unit, `${where}.unit`, errors, { cut: MAX_UNIT_CHARS });
 	if (field === undefined || agg === undefined) return undefined;
 	return {
 		field,
 		agg,
 		...(key !== undefined ? { key } : {}),
 		...(unit !== undefined ? { unit } : {}),
-		...(digits !== undefined ? { digits } : {}),
-		...(better !== undefined ? { better } : {}),
+		...(ref.digits !== undefined ? { digits: ref.digits } : {}),
+		...(ref.better !== undefined ? { better: ref.better } : {}),
 	};
 }
 
-function parseBlock(value: unknown, where: string, errors: string[]): JobWidgetBlockSpec | undefined {
-	if (!isRecord(value)) {
-		errors.push(`${where}: expected an object`);
-		return undefined;
-	}
+function parseBlock(block: BlockShape, where: string, errors: string[]): JobWidgetBlockSpec | undefined {
 	const before = errors.length;
 	const label = (): string =>
-		str(value.label, `${where}.label`, errors, { cut: MAX_LABEL_CHARS, required: true }) ?? "";
-	const unit = (): string | undefined => str(value.unit, `${where}.unit`, errors, { cut: MAX_UNIT_CHARS });
-	const field = (): string => fieldName(value.field, `${where}.field`, errors) ?? "";
+		text(block.label, `${where}.label`, errors, { cut: MAX_LABEL_CHARS, required: true }) ?? "";
+	const unit = (): string | undefined => text(block.unit, `${where}.unit`, errors, { cut: MAX_UNIT_CHARS });
+	const field = (): string => fieldName(block.field, `${where}.field`, errors) ?? "";
+	const key = (): string | undefined => text(block.key, `${where}.key`, errors);
 	const optional = <T>(entry: T | undefined, name: string): Record<string, T> =>
 		entry === undefined ? {} : { [name]: entry };
-	let block: JobWidgetBlockSpec | undefined;
-	switch (value.kind) {
+	let result: JobWidgetBlockSpec | undefined;
+	switch (block.kind) {
 		case "spark":
-			block = {
+			result = {
 				kind: "spark",
 				field: field(),
 				label: label(),
-				...optional(str(value.key, `${where}.key`, errors, { max: 120 }), "key"),
+				...optional(key(), "key"),
 				...optional(unit(), "unit"),
-				...optional(betterValue(value.better, `${where}.better`, errors), "better"),
-				...optional(num(value.target, `${where}.target`, errors), "target"),
+				...optional(block.better, "better"),
+				...optional(block.target, "target"),
 				...optional(
-					str(value.targetLabel, `${where}.targetLabel`, errors, { cut: MAX_LABEL_CHARS }),
+					text(block.targetLabel, `${where}.targetLabel`, errors, { cut: MAX_LABEL_CHARS }),
 					"targetLabel",
 				),
-				...optional(num(value.min, `${where}.min`, errors), "min"),
-				...optional(num(value.max, `${where}.max`, errors), "max"),
+				...optional(block.min, "min"),
+				...optional(block.max, "max"),
 			};
 			break;
 		case "bars":
-			block = {
+			result = {
 				kind: "bars",
 				field: field(),
-				agg: aggregation(value.agg, `${where}.agg`, errors, true) ?? "last",
+				agg: requiredAgg(block.agg, `${where}.agg`, errors) ?? "last",
 				label: label(),
 				...optional(unit(), "unit"),
-				...optional(num(value.max, `${where}.max`, errors), "max"),
-				...optional(betterValue(value.better, `${where}.better`, errors), "better"),
+				...optional(block.max, "max"),
+				...optional(block.better, "better"),
 			};
 			break;
 		case "meter": {
-			const whole = typeof value.total === "string" ? Number(value.total) : value.total;
+			const whole = typeof block.total === "string" ? Number(block.total) : block.total;
 			// A meter whose whole is unknown (absent, `"?"`, `null`) is a plain number: drawn as a
 			// stat rather than sent back for a retry.
-			if (!isRecord(whole) && (typeof whole !== "number" || Number.isNaN(whole))) {
-				const ref = parseValueRef(value, where, errors);
-				block = ref && { kind: "stat", items: [{ ...ref, label: label() }] };
+			if (whole === undefined || (typeof whole === "number" && Number.isNaN(whole))) {
+				const ref = parseValueRef(block, where, errors);
+				result = ref && { kind: "stat", items: [{ ...ref, label: label() }] };
 				break;
 			}
 			let total: number | JobWidgetValueRef | undefined;
@@ -720,116 +707,72 @@ function parseBlock(value: unknown, where: string, errors: string[]): JobWidgetB
 				if (!Number.isFinite(whole) || whole <= 0) errors.push(`${where}.total: expected a positive number`);
 				else total = whole;
 			} else {
-				total = parseValueRef(value.total, `${where}.total`, errors);
+				total = parseValueRef(whole, `${where}.total`, errors);
 			}
-			block = {
+			result = {
 				kind: "meter",
 				field: field(),
-				agg: aggregation(value.agg, `${where}.agg`, errors, true) ?? "last",
+				agg: requiredAgg(block.agg, `${where}.agg`, errors) ?? "last",
 				total: total ?? 1,
 				label: label(),
-				...optional(str(value.key, `${where}.key`, errors, { max: 120 }), "key"),
+				...optional(key(), "key"),
 				...optional(unit(), "unit"),
 			};
 			break;
 		}
 		case "stat": {
-			const items =
-				list(value.items, `${where}.items`, errors, 1, MAX_STAT_ITEMS)?.map((item, index) => {
-					const itemWhere = `${where}.items[${index}]`;
-					const ref = parseValueRef(item, itemWhere, errors);
-					const itemLabel = isRecord(item)
-						? str(item.label, `${itemWhere}.label`, errors, { cut: MAX_LABEL_CHARS, required: true })
-						: undefined;
-					return ref && itemLabel !== undefined ? { ...ref, label: itemLabel } : undefined;
-				}) ?? [];
-			block = { kind: "stat", items: items.filter(item => item !== undefined) };
+			if (!block.items) errors.push(`${where}.items: required`);
+			const items = (block.items ?? []).map((item, index) => {
+				const itemWhere = `${where}.items[${index}]`;
+				const ref = parseValueRef(item, itemWhere, errors);
+				const itemLabel = text(item.label, `${itemWhere}.label`, errors, { cut: MAX_LABEL_CHARS, required: true });
+				return ref && itemLabel !== undefined ? { ...ref, label: itemLabel } : undefined;
+			});
+			result = { kind: "stat", items: items.filter(item => item !== undefined) };
 			break;
 		}
 		case "grid": {
 			const tones: Record<string, TspTone> = {};
-			if (!isRecord(value.tones)) errors.push(`${where}.tones: expected an object of status substring → tone`);
+			if (!block.tones) errors.push(`${where}.tones: expected an object of status substring → tone`);
 			else {
-				let count = 0;
-				for (const status in value.tones) {
-					const tone = value.tones[status];
-					if (++count > MAX_GRID_TONES) {
-						errors.push(`${where}.tones: at most ${MAX_GRID_TONES} entries`);
-						break;
-					}
+				const statuses = Object.keys(block.tones);
+				if (statuses.length > MAX_GRID_TONES) errors.push(`${where}.tones: at most ${MAX_GRID_TONES} entries`);
+				for (const status of statuses.slice(0, MAX_GRID_TONES)) {
+					// An empty status would match every cell, colouring any text as a status.
 					if (status.trim().length === 0) {
-						// An empty status would match every cell, colouring any text as a status.
 						errors.push(`${where}.tones: an empty status matches every cell; name the status word`);
-					} else if (typeof tone === "string" && (JOB_WIDGET_TONES as readonly string[]).includes(tone)) {
-						tones[status] = tone as TspTone;
 					} else {
-						errors.push(`${where}.tones.${status}: expected one of ${JOB_WIDGET_TONES.join(", ")}`);
+						tones[status] = block.tones[status];
 					}
 				}
 			}
-			block = { kind: "grid", field: field(), label: label(), tones };
+			result = { kind: "grid", field: field(), label: label(), tones };
 			break;
 		}
 		case "text":
-			block = { kind: "text", field: field() };
+			result = { kind: "text", field: field() };
 			break;
-		default:
-			errors.push(`${where}.kind: expected spark, bars, meter, stat, grid or text`);
-			return undefined;
 	}
-	return errors.length === before ? block : undefined;
+	return errors.length === before ? result : undefined;
 }
 
-function list(value: unknown, where: string, errors: string[], min: number, max: number): unknown[] | undefined {
-	if (!Array.isArray(value)) {
-		errors.push(`${where}: expected an array`);
-		return undefined;
-	}
-	if (value.length < min || value.length > max) {
-		errors.push(`${where}: expected ${min}–${max} entries, got ${value.length}`);
-		return undefined;
-	}
-	return value;
-}
-
-function str(
-	value: unknown,
+/** Trimmed text; blank reads as absent. Display text (`cut`) is shortened to fit rather than sent back for a retry. */
+function text(
+	value: string | undefined,
 	where: string,
 	errors: string[],
-	options: { max?: number; cut?: number; required?: boolean } = {},
+	options: { cut?: number; required?: boolean } = {},
 ): string | undefined {
-	if (value === undefined || value === null) {
-		if (options.required) errors.push(`${where}: required`);
+	const trimmed = value?.trim();
+	if (!trimmed) {
+		if (options.required) errors.push(`${where}: ${value === undefined ? "required" : "must not be empty"}`);
 		return undefined;
 	}
-	if (typeof value !== "string") {
-		errors.push(`${where}: expected a string`);
-		return undefined;
-	}
-	const trimmed = value.trim();
-	if (trimmed.length === 0) {
-		if (options.required) errors.push(`${where}: must not be empty`);
-		return undefined;
-	}
-	if (options.max !== undefined && trimmed.length > options.max) {
-		errors.push(`${where}: at most ${options.max} characters`);
-		return undefined;
-	}
-	// Display text (titles, labels, units) is cut to fit rather than sent back for a retry.
 	return options.cut === undefined ? trimmed : truncate(trimmed, options.cut);
 }
 
-function num(value: unknown, where: string, errors: string[]): number | undefined {
-	if (value === undefined || value === null) return undefined;
-	if (typeof value !== "number" || !Number.isFinite(value)) {
-		errors.push(`${where}: expected a finite number`);
-		return undefined;
-	}
-	return value;
-}
-
-function fieldName(value: unknown, where: string, errors: string[]): string | undefined {
-	const name = str(value, where, errors, { required: true });
+function fieldName(value: string | undefined, where: string, errors: string[]): string | undefined {
+	const name = text(value, where, errors, { required: true });
 	if (name !== undefined && !FIELD_NAME.test(name)) {
 		errors.push(`${where}: "${name}" must match ${FIELD_NAME.source}`);
 		return undefined;
@@ -837,17 +780,7 @@ function fieldName(value: unknown, where: string, errors: string[]): string | un
 	return name;
 }
 
-function aggregation(value: unknown, where: string, errors: string[], required: boolean): JobWidgetAgg | undefined {
-	if (value === undefined && !required) return undefined;
-	if (typeof value === "string" && (JOB_WIDGET_AGGS as readonly string[]).includes(value))
-		return value as JobWidgetAgg;
-	errors.push(`${where}: expected one of ${JOB_WIDGET_AGGS.join(", ")}`);
-	return undefined;
-}
-
-function betterValue(value: unknown, where: string, errors: string[]): JobWidgetBetter | undefined {
-	if (value === undefined || value === null) return undefined;
-	if (value === "higher" || value === "lower") return value;
-	errors.push(`${where}: expected "higher" or "lower"`);
-	return undefined;
+function requiredAgg(value: JobWidgetAgg | undefined, where: string, errors: string[]): JobWidgetAgg | undefined {
+	if (value === undefined) errors.push(`${where}: expected one of ${JOB_WIDGET_AGGS.join(", ")}`);
+	return value;
 }
