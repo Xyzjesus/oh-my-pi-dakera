@@ -315,14 +315,15 @@ describe("job widget registry", () => {
 		};
 		// Registered first so its delay runs out first: finished by then, it is never captioned.
 		start("for i in $(seq 40); do sleep 3; done").finish();
-		const short = start("bun test 2>&1").job;
+		// Glanceable: a redirection and quoted metacharacters are not control flow.
+		start("bun test 2>&1");
+		start("curl -sO 'https://x.test/a?one=1&two=2|3'");
 		const held = start("while ! test -f ready; do sleep 1; done; cat ready", undefined, true);
 		const watch = start("while ssh worker 'systemctl is-active indexer'; do sleep 60; done", "Wait for the indexer");
 
 		await notified.promise;
 		expect(calls).toEqual([[watch.job.label, "Wait for the indexer"]]);
 		expect(watch.job.caption).toBe("Checks worker every 60s until the indexer stops");
-		expect(short.caption).toBeUndefined();
 
 		// Promoted past its delay, the foreground job is captioned right away.
 		notified = Promise.withResolvers<void>();

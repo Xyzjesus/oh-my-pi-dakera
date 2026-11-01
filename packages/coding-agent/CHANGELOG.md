@@ -4,7 +4,7 @@
 
 ### Added
 
-- Long or multi-step background shell commands get a one-line caption saying what they do and when they end, written once per job by the `widget` model role after the job has run 15 seconds; the jobs sheet, `/jobs full` and the jobs HUD hover show it under the job's purpose. It follows the Live Job Widgets setting (`async.widgets`) ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
+- Long or multi-step background shell commands get a one-line caption saying what they do and when they end, written once per job by the `widget` model role after the job has run 15 seconds in the background; the jobs sheet and `/jobs full` show it under the job's purpose. It follows the Live Job Widgets setting (`async.widgets`), and `CreateAgentSessionOptions.jobCaptionWriter` replaces the model call ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Changed
 

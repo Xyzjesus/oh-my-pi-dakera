@@ -253,7 +253,8 @@ export class JobWidgets implements JobWidgetRegistry {
 		try {
 			if (job.status !== "running" || !this.#enabled()) return;
 			const caption = await this.#captioner?.(command, job.intent, request.signal);
-			if (!caption || request.signal.aborted) return;
+			// Widgets turned off while the model wrote it: drop it, like a spec.
+			if (!caption || request.signal.aborted || !this.#enabled()) return;
 			job.caption = caption;
 			this.#notify();
 		} catch (error) {

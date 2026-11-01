@@ -34,12 +34,15 @@ const MAX_CAPTION_CHARS = 200;
 
 /**
  * Whether a command needs explaining: one longer than a glance or using
- * shell control flow (`;`, pipes, `&`, substitutions, several lines);
- * redirections like `2>&1` are not control flow.
+ * shell control flow (`;`, pipes, `&`, substitutions, several lines).
+ * Redirections like `2>&1` and quoted text are not control flow; a
+ * double-quoted span that substitutes still is.
  */
 export function needsJobCaption(command: string): boolean {
 	const trimmed = command.trim();
-	return trimmed.length > GLANCEABLE_COMMAND_CHARS || /[\n;|&`]|\$\(/.test(trimmed.replace(/\d*>&\d*|&>/g, ""));
+	if (trimmed.length > GLANCEABLE_COMMAND_CHARS) return true;
+	const unquoted = trimmed.replace(/'[^']*'|"(?:[^"\\$`]|\\.)*"|\d*>&\d*|&>/g, "");
+	return /[\n;|&`]|\$\(/.test(unquoted);
 }
 
 /** The caption in a model reply: its first non-empty line as plain text, unquoted, without list markers or a final period. */

@@ -13,7 +13,7 @@ import {
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
-import { truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenEmbeddedPaths, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { buildJobTree, jobTreeGuide, jobTreeIndent } from "@oh-my-pi/pi-tui/overlays/job-tree";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
@@ -371,7 +371,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				const indent = jobTreeIndent(row, theme);
 				for (const entry of lines) {
 					if (!entry) continue;
-					const text = sanitizeText(entry);
+					const text = shortenEmbeddedPaths(sanitizeText(entry));
 					if (text === job.id) continue;
 					for (const line of text.split("\n")) rows.push(`${indent}${line}`);
 				}
