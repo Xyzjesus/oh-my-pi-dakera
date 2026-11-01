@@ -887,7 +887,8 @@ export class CommandController {
 			// A spawned subagent's task job takes the agent's id as its id and label: name it once.
 			const agent = row.agent && row.agent.id !== job.id ? ` ${theme.bold(row.agent.id)}` : "";
 			info += `${guide}${renderJobLine(job, now)}${agent}\n`;
-			const text = full ? (job.command ?? job.label) : job.label;
+			// What the job is for leads; full mode follows it with the whole command.
+			const text = full ? (job.command ?? job.label) : (job.intent ?? job.label);
 			if (text === job.id) continue;
 			const indent = jobTreeIndent(row, theme);
 			const prefix = theme.fg("dim", indent);
@@ -897,7 +898,7 @@ export class CommandController {
 				continue;
 			}
 			for (const line of wrapTextWithAnsi(
-				replaceTabs(sanitizeText(text)),
+				replaceTabs(sanitizeText(job.intent ? `${job.intent}\n${text}` : text)),
 				Math.max(1, columns - 4 - visibleWidth(indent)),
 			)) {
 				info += `${prefix}${theme.fg("dim", line)}\n`;

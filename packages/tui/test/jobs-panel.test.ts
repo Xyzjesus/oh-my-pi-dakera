@@ -259,6 +259,41 @@ describe("JobsSheet", () => {
 		expect(lines.findIndex(line => line.includes("running 12 tests"))).toBeGreaterThan(head);
 	});
 
+	it("leads a job with its intent over the command, and drops a widget with nothing beyond its title", async () => {
+		await initTheme();
+		const intent = "Waiting for stock watch to finish";
+		const command = "ssh pc-worker 'while systemctl --user is-active -q watch; do sleep 60; done'";
+		const job: JobsPanelJob = {
+			id: "bg_27",
+			type: "bash",
+			status: "running",
+			label: command,
+			intent,
+			startTime: NOW,
+		};
+		const detail: JobsPanelDetail = {
+			command,
+			cwd: "/work",
+			pids: [41],
+			widget: { title: intent, blocks: [], state: "fallback", updatedAt: NOW },
+		};
+		const sheet = new JobsSheet({
+			load: () => ({ running: [job], recent: [] }),
+			inspect: () => detail,
+			close: vi.fn(),
+		});
+		const root = sheet.describe(CX);
+		expect(texts(list(root)!)).toContain(intent);
+		expect(texts(list(root)!)).not.toContain("systemctl");
+		expect(prop(byRole(root, "omp.jobs.title")[0], "text")).toBe(intent);
+		expect(prop(byRole(root, "omp.jobs.command")[0], "text")).toBe(command);
+		expect(byRole(root, "omp.jobs.widget")).toHaveLength(0);
+
+		const lines = sheet.render(160).map(line => Bun.stripANSI(line));
+		expect(lines.find(line => line.includes("bg_27") || line.includes("running  bash"))).toContain(intent);
+		expect(lines.filter(line => line.includes(intent))).toHaveLength(1);
+	});
+
 	describe("as a tree of subagents", () => {
 		beforeAll(async () => {
 			await initTheme();

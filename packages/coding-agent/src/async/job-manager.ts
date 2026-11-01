@@ -86,6 +86,12 @@ export interface AsyncJob {
 	/** When the job's run settled; `endTime - startTime` is its frozen run duration. */
 	endTime?: number;
 	label: string;
+	/**
+	 * What the job is for, in the model's words: the `i` intent on the call
+	 * that started it. Job views lead with it, since a process job's `label`
+	 * is its raw command line.
+	 */
+	intent?: string;
 	abortController: AbortController;
 	promise: Promise<void>;
 	resultText?: string;
@@ -261,6 +267,8 @@ export interface AsyncJobRegisterOptions {
 	foreground?: boolean;
 	/** The process the job runs; see {@link AsyncJob.process}. */
 	process?: AsyncJobProcess;
+	/** See {@link AsyncJob.intent}. */
+	intent?: string;
 	/** See {@link AsyncJob.widgetInputs}. */
 	widgetInputs?: JobWidgetInputs;
 }
@@ -416,6 +424,7 @@ export class AsyncJobManager {
 			status: "running",
 			startTime,
 			label,
+			...(options?.intent ? { intent: options.intent } : {}),
 			abortController,
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,

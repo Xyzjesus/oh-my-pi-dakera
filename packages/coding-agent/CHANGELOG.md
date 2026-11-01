@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Background bash jobs now carry the purpose the model gave for the command: `/jobs`, `/jobs full`, `proc://` listings, `wait` and `job` results, and the jobs HUD hover lead with it ahead of the raw command line
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

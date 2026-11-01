@@ -26,6 +26,8 @@ export interface JobsPanelJob {
 	readonly type: string;
 	readonly status: "running" | "completed" | "failed" | "cancelled";
 	readonly label: string;
+	/** What the job is for, in the model's words; rows and the detail lead with it over a command `label`. */
+	readonly intent?: string;
 	readonly startTime: number;
 	readonly endTime?: number;
 	/** Registry id of the agent that owns the job. */
@@ -202,7 +204,7 @@ export class JobsSheet implements Component {
 			const agent = entry.agent && entry.agent.id !== job.label ? `${entry.agent.id}: ` : "";
 			lines.push(
 				truncateToWidth(
-					`${cursor} ${guide}${job.status}  ${job.type} ${age}  ${agent}${collapseCommand(job.label)}`,
+					`${cursor} ${guide}${job.status}  ${job.type} ${age}  ${agent}${job.intent ?? collapseCommand(job.label)}`,
 					width,
 				),
 			);
@@ -227,7 +229,7 @@ export class JobsSheet implements Component {
 				detail.artifactId && `artifact://${detail.artifactId}`,
 			]);
 			if (facts.length > 0) lines.push(truncateToWidth(`   ${facts.join(" · ")}`, width));
-			if (detail.widget) {
+			if (detail.widget && widgetHasData(detail.widget)) {
 				for (const line of renderJobWidgetLines(detail.widget, Math.max(0, width - 3), theme)) {
 					lines.push(`   ${line}`);
 				}
@@ -331,6 +333,11 @@ function jobAge(job: JobsPanelJob, nowMs: number): number {
 	return Math.max(0, (job.endTime ?? nowMs) - job.startTime);
 }
 
+/** Whether a widget draws more than its title: one without data only repeats the job's heading. */
+function widgetHasData(widget: JobWidgetView): boolean {
+	return widget.blocks.length > 0 || widget.headline !== undefined || Boolean(widget.stage);
+}
+
 /**
  * The last `count` pieces of `text.trimEnd().split("\n")`, found by scanning
  * back from the end so a long running output is never split as a whole.
@@ -373,8 +380,9 @@ function describeJobList(rows: readonly JobTreeRow<JobsPanelJob>[], selected: Jo
 
 /**
  * One list row: the type icon tinted by status, the tree connector, the
- * subagent a task job runs, the one-line label (a process job's command in
- * mono, a task's work in prose) and how long it ran.
+ * subagent a task job runs, the one-line label (what the job is for when the
+ * model said, else a process job's command in mono or a task's work in prose)
+ * and how long it ran.
  */
 function describeJobItem(job: JobsPanelJob, agentName: string | undefined, guide: string, nowMs: number): NativeNode {
 	const status = STATUS_LABEL[job.status];
@@ -383,13 +391,17 @@ function describeJobItem(job: JobsPanelJob, agentName: string | undefined, guide
 		label: compact([
 			guide !== "" && span(guide, "mono dim"),
 			agentName !== undefined && agentName !== job.label && span(`${agentName} `, "strong"),
-			job.type === "task" ? span(job.label) : span(collapseCommand(job.label), "mono"),
+			job.intent
+				? span(job.intent)
+				: job.type === "task"
+					? span(job.label)
+					: span(collapseCommand(job.label), "mono"),
 		]),
 		value: [span(age, "mono")],
 		icon: TYPE_ICON[job.type] ?? "job",
 		tone: STATUS_TONE[job.status],
-		title: `${job.label}\n${status} · ${job.type} · ${job.id}`,
-		aria: `${job.label}, ${status.toLowerCase()}, ${age}`,
+		title: `${job.intent ? `${job.intent}\n` : ""}${job.label}\n${status} · ${job.type} · ${job.id}`,
+		aria: `${job.intent ?? job.label}, ${status.toLowerCase()}, ${age}`,
 	});
 }
 
@@ -422,8 +434,8 @@ function describeEmpty(): NativeNode {
 
 /**
  * The selected job: a status line (pill, live elapsed, type · id, Cancel job
- * when `cancellable`), its task or full command, facts and the output pane (or
- * its empty state).
+ * when `cancellable`), what it is for, its full command, facts, its widget
+ * when it has data to draw and the output pane (or its empty state).
  */
 function describeDetail(
 	job: JobsPanelJob,
@@ -435,6 +447,7 @@ function describeDetail(
 	const exit = detail?.exitCode;
 	const age = Math.round(jobAge(job, nowMs));
 	const command = detail?.command ?? (job.type === "task" ? undefined : job.label);
+	const title = job.intent ?? (command ? undefined : job.label);
 	const pids = detail?.pids ?? [];
 	const facts = compact([
 		job.agentId ? { k: "Agent", v: [span(job.agentId, "mono")] } : undefined,
@@ -464,11 +477,14 @@ function describeDetail(
 			]),
 			{ role: "omp.jobs.status", gap: "sm", align: "center" },
 		),
+		title ? text(title, { role: "omp.jobs.title", wrap: "word" }) : undefined,
 		command
 			? code(command, { lang: "bash", wrap: true, preview: { lines: 4 }, role: "omp.jobs.command" })
-			: text(job.label, { role: "omp.jobs.title", wrap: "word" }),
+			: undefined,
 		facts.length > 0 && node("kv", { items: facts, role: "omp.jobs.facts" }),
-		detail?.widget && node("col", { role: "omp.jobs.widget" }, [describeJobWidget(detail.widget)], "widget"),
+		detail?.widget &&
+			widgetHasData(detail.widget) &&
+			node("col", { role: "omp.jobs.widget" }, [describeJobWidget(detail.widget)], "widget"),
 		node(
 			"col",
 			{ role: "omp.jobs.out", gap: "sm" },

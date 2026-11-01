@@ -114,7 +114,7 @@ export class JobWidgets implements JobWidgetRegistry {
 			entry = {
 				job,
 				runtime,
-				view: runtime.view({ label: job.label, authoring: false }),
+				view: runtime.view({ label: job.intent || job.label, authoring: false }),
 				viewKey: "",
 				lastIngestAt: Number.NEGATIVE_INFINITY,
 				shown: false,
@@ -188,7 +188,7 @@ export class JobWidgets implements JobWidgetRegistry {
 
 	#recompute(entry: WidgetEntry, brief: JobWidgetBrief): boolean {
 		const view = entry.runtime.view({
-			label: entry.job.label,
+			label: entry.job.intent || entry.job.label,
 			stage: brief.stage,
 			// A subagent's tool results are file contents and search hits; only a command's newest line says what it does.
 			lineStage: brief.kind === "bash",

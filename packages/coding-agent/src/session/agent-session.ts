@@ -504,6 +504,7 @@ function jobSnapshotItem(job: AsyncJob): AsyncJobSnapshotItem {
 		type: job.type,
 		status: job.status,
 		label: job.label,
+		intent: job.intent,
 		command: job.process?.command,
 		startTime: job.startTime,
 		endTime: job.endTime,
