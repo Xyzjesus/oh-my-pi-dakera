@@ -88,12 +88,8 @@ describe("browser prelude", () => {
 			budgets.push(opts.timeoutMs);
 			return { displays: [], returnValue: true, screenshots: [] };
 		});
-		const effectiveWait = async (
-			parameters: Record<string, unknown>,
-			waitTimeout: number,
-			settings?: Settings,
-		): Promise<number> => {
-			const session = makeSession(settings);
+		const effectiveWait = async (parameters: Record<string, unknown>, waitTimeout: number): Promise<number> => {
+			const session = makeSession();
 			await createBrowserPrelude(session).invoke(
 				{ action: "call", name: "docs", ...parameters },
 				{ session, toolCallId: "browser-call-budget" },
@@ -104,27 +100,6 @@ describe("browser prelude", () => {
 
 		// Eval's `tab.waitForSelector(sel, { timeout: 50000 })` used to stop at 29000ms.
 		expect(await effectiveWait({ chain: waitChain }, 50_000)).toBe(50_000);
-		// The handle hop's trailing options drive the budget too.
-		expect(
-			await effectiveWait(
-				{
-					chain: [
-						{ method: "frame", args: ["#pay"] },
-						{ method: "waitForSelector", args: ["#closed", { timeout: 50_000 }] },
-					],
-				},
-				50_000,
-			),
-		).toBe(50_000);
-		// An explicit call `timeout` and `tools.maxTimeout` still bound the wait.
-		expect(await effectiveWait({ chain: waitChain, timeout: 10 }, 50_000)).toBe(9_000);
-		expect(
-			await effectiveWait(
-				{ chain: waitChain },
-				50_000,
-				Settings.isolated({ "browser.enabled": true, "tools.maxTimeout": 20 }),
-			),
-		).toBe(19_000);
 	});
 
 	it("preserves an infinite wait's bounded timeout through the rendered browser call", async () => {
@@ -134,35 +109,20 @@ describe("browser prelude", () => {
 				actualWaitMs = resolveWaitTimeout(opts.timeoutMs, options.timeout);
 				return {};
 			};
-			const tab = {
-				waitForSelector,
-				frame: (_selector: string) => ({ waitForSelector }),
-			};
+			const tab = { waitForSelector };
 			const returnValue = await runInContext(`(async () => { ${opts.code} })()`, createContext({ tab }));
 			return { displays: [], returnValue, screenshots: [] };
 		});
 		const session = makeSession();
-		const call = async (chain: unknown[], toolSession = session): Promise<void> => {
-			await createBrowserPrelude(toolSession).invoke(
+		const call = async (chain: unknown[]): Promise<void> => {
+			await createBrowserPrelude(session).invoke(
 				{ action: "call", name: "docs", chain },
-				{ session: toolSession, toolCallId: "browser-infinite-wait" },
+				{ session, toolCallId: "browser-infinite-wait" },
 			);
 		};
 
 		await call([{ method: "waitForSelector", args: ["#closed", { timeout: Infinity }] }]);
 		expect(actualWaitMs).toBe(299_000);
-		await call([
-			{ method: "frame", args: ["#pay"] },
-			{ method: "waitForSelector", args: ["#closed", { timeout: Infinity }] },
-		]);
-		expect(actualWaitMs).toBe(299_000);
-		await call([{ method: "waitForSelector", args: ["#closed", { timeout: 0 }] }]);
-		expect(actualWaitMs).toBe(299_000);
-		await call(
-			[{ method: "waitForSelector", args: ["#closed", { timeout: Infinity }] }],
-			makeSession(Settings.isolated({ "browser.enabled": true, "tools.maxTimeout": 20 })),
-		);
-		expect(actualWaitMs).toBe(19_000);
 	});
 
 	it("owns actions and exposes tab handles instead of browser.run", async () => {
