@@ -504,6 +504,7 @@ type SetToolUIContextSpy = (uiContext: ExtensionUIContext, hasUI: boolean) => vo
 interface AgentHarness {
 	agent: AcpAgent;
 	updates: SessionNotification[];
+	extNotifications: Array<{ method: string; params: Record<string, unknown> }>;
 	abortController: AbortController;
 	sessions: FakeAgentSession[];
 	setToolUIContextSpies: SetToolUIContextSpy[];
@@ -570,6 +571,7 @@ async function createHarness(
 	await Settings.init({ agentDir, inMemory: true });
 
 	const updates: SessionNotification[] = [];
+	const extNotifications: AgentHarness["extNotifications"] = [];
 	const abortController = new AbortController();
 	const sessions: FakeAgentSession[] = [];
 	const setToolUIContextSpies: SetToolUIContextSpy[] = [];
@@ -580,6 +582,9 @@ async function createHarness(
 			// microtask before the push and perturb ordering-sensitive tests.
 			if (options.sessionUpdateHook) await options.sessionUpdateHook(notification);
 			updates.push(notification);
+		},
+		extNotification: async (method: string, params: Record<string, unknown>) => {
+			extNotifications.push({ method, params });
 		},
 		requestPermissionWithCancel: (request: RequestPermissionRequest) => {
 			options.permissionHandler?.(request);
@@ -626,6 +631,7 @@ async function createHarness(
 	return {
 		agent,
 		updates,
+		extNotifications,
 		abortController,
 		sessions,
 		setToolUIContextSpies,
@@ -1007,6 +1013,38 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("buffers compaction notifications until the client knows the session", async () => {
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const emit = (event: AgentSessionEvent) => {
+			for (const listener of session.listeners()) listener(event);
+		};
+
+		emit({ type: "auto_compaction_start", reason: "threshold", action: "context-full" });
+		expect(harness.extNotifications).toEqual([]);
+		await advanceBootstrapGuard();
+		emit({ type: "auto_compaction_end", action: "context-full", result: undefined, aborted: false, willRetry: true });
+		await Promise.resolve();
+
+		expect(harness.extNotifications).toEqual([
+			{
+				method: "_omp/compaction/start",
+				params: { sessionId: created.sessionId, reason: "threshold", action: "context-full" },
+			},
+			{
+				method: "_omp/compaction/end",
+				params: expect.objectContaining({
+					sessionId: created.sessionId,
+					action: "context-full",
+					aborted: false,
+					willRetry: true,
+				}),
+			},
+		]);
 	});
 
 	it("pushes config_option_update when thinking level changes internally", async () => {

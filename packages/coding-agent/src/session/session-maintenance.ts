@@ -1961,7 +1961,7 @@ export class SessionMaintenance {
 							details: { kind: "experimental-context-rollover", version: 1 },
 							preserveData: prepared.preserveData,
 						};
-			const savedCompactionEntry = await this.#commitCompactionEntry({
+			await this.#commitCompactionEntry({
 				...result,
 				fromExtension,
 				method: undefined,
@@ -1983,7 +1983,6 @@ export class SessionMaintenance {
 					type: "auto_compaction_end",
 					action: "context-full",
 					result: compactionResult,
-					tokensAfter: savedCompactionEntry?.tokensAfter,
 					aborted: false,
 					willRetry,
 				},
@@ -2637,6 +2636,7 @@ export class SessionMaintenance {
 		this.#host.persistEvalStateContext();
 		// A committed compaction starts a new cycle; native compaction gets a fresh try.
 		this.#failedNativeSpeculation = undefined;
+		const newEntries = this.#host.sessionManager.getEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.rebaseAfterCompaction();
@@ -2651,7 +2651,9 @@ export class SessionMaintenance {
 		} else {
 			this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		}
-		const savedCompactionEntry = this.#host.sessionManager.getEntry(entryId) as CompactionEntry | undefined;
+		const savedCompactionEntry = newEntries.find(e => e.type === "compaction" && e.id === entryId) as
+			| CompactionEntry
+			| undefined;
 		if (this.#host.extensionRunner && savedCompactionEntry) {
 			const compactEmit = this.#host.extensionRunner.emit({
 				type: "session_compact",
@@ -4439,14 +4441,14 @@ export class SessionMaintenance {
 	 * Each tier that rewrote history re-anchors the in-flight context snapshot,
 	 * then the caller's progress predicate is re-tested; the first tier that
 	 * restores progress emits one info notice describing everything freed and
-	 * stops. Returns the progress outcome and the exact replacement entry, if
-	 * frame rescue committed one; lack of progress falls through to the warning.
+	 * stops. Returns whether progress was restored — `false` falls through to
+	 * the dead-end warning.
 	 */
 	async #rescueCompactionDeadEnd(
 		signal: AbortSignal,
 		options: { skipElide: boolean; hasProgress: () => boolean },
-	): Promise<{ hasProgress: boolean; compactionEntry?: CompactionEntry }> {
-		if (signal.aborted) return { hasProgress: false };
+	): Promise<boolean> {
+		if (signal.aborted) return false;
 		// Tier 0 — a snapcompact pass whose just-written frame archive is itself
 		// the over-budget cost (each pass re-renders the carried-forward text
 		// into MORE frames, so the archive grows past the recovery band and the
@@ -4457,8 +4459,7 @@ export class SessionMaintenance {
 			resolveMethodSettings(this.#compactionSettings, "snapcompact"),
 			signal,
 		);
-		const compactionEntry = frameRescue?.entry;
-		if (frameRescue !== undefined && options.hasProgress()) return { hasProgress: true, compactionEntry };
+		if (frameRescue !== undefined && options.hasProgress()) return true;
 		let elided = 0;
 		let elidedTokens = 0;
 		let elideSink = "placeholders";
@@ -4485,10 +4486,10 @@ export class SessionMaintenance {
 					`Compaction dead-end recovery: ${this.#describeElideRescue(elided, elidedTokens, elideSink)} so maintenance could make progress.`,
 					"compaction",
 				);
-				return { hasProgress: true, compactionEntry };
+				return true;
 			}
 		}
-		if (signal.aborted) return { hasProgress: false, compactionEntry };
+		if (signal.aborted) return false;
 		let imagesDropped = 0;
 		try {
 			imagesDropped = (await this.#host.dropImages()).removed;
@@ -4505,9 +4506,9 @@ export class SessionMaintenance {
 				`Compaction dead-end recovery: ${elidedPart}dropped ${imagesDropped} attached image${imagesDropped === 1 ? "" : "s"} so maintenance could make progress.`,
 				"compaction",
 			);
-			return { hasProgress: true, compactionEntry };
+			return true;
 		}
-		return { hasProgress: false, compactionEntry };
+		return false;
 	}
 
 	/** Notice fragment for a dead-end elide tier: what was freed and where it went. */
@@ -4587,7 +4588,7 @@ export class SessionMaintenance {
 		branchEntries: SessionEntry[],
 		settings: EngineCompactionSettings,
 		signal: AbortSignal,
-	): Promise<{ result: snapcompact.CompactionResult; entry?: CompactionEntry } | undefined> {
+	): Promise<snapcompact.CompactionResult | undefined> {
 		if (signal.aborted) return undefined;
 		// Re-rendering frames needs a vision-capable model, same gate as the
 		// snapcompact method.
@@ -4673,7 +4674,9 @@ export class SessionMaintenance {
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		// Extensions must see the entry that is now active, not (only) the one
 		// this rebuild just superseded — mirror the regular append path's hook.
-		const rebuiltEntry = this.#host.sessionManager.getEntry(rebuiltEntryId) as CompactionEntry | undefined;
+		const rebuiltEntry = this.#host.sessionManager.getEntries().find(e => e.id === rebuiltEntryId) as
+			| CompactionEntry
+			| undefined;
 		if (this.#host.extensionRunner && rebuiltEntry) {
 			await this.#host.extensionRunner.emit({
 				type: "session_compact",
@@ -4686,7 +4689,7 @@ export class SessionMaintenance {
 			`Compaction dead-end recovery: rebuilt the trailing snapcompact archive at a smaller frame budget (${archive.frames.length} → ${rebuilt.frames.length} frames) so maintenance could make progress.`,
 			"compaction",
 		);
-		return { result, entry: rebuiltEntry };
+		return result;
 	}
 
 	/**
@@ -5322,23 +5325,21 @@ export class SessionMaintenance {
 				// declaring victory on a mere frame-count shrink would skip the
 				// elide/image tiers that can still reach that tail and suppress a
 				// warning the user should see.
-				let frameRescue: { result: snapcompact.CompactionResult; entry?: CompactionEntry } | undefined;
-				let frameRescueEntry: CompactionEntry | undefined;
+				let frameRescueResult: snapcompact.CompactionResult | undefined;
 				let frameRescueCreatedHeadroom = false;
 				if (reason !== "idle") {
-					frameRescue = await this.#rescueSnapcompactFrameOverflow(
+					frameRescueResult = await this.#rescueSnapcompactFrameOverflow(
 						pathEntriesForCompaction,
 						effectiveSettings,
 						autoCompactionSignal,
 					);
-					frameRescueEntry = frameRescue?.entry;
-					if (frameRescue) {
+					if (frameRescueResult) {
 						rescueRewroteHistory = true;
 						pathEntriesForCompaction = this.#host.sessionManager.getBranch();
 						frameRescueCreatedHeadroom = this.#compactionCreatedHeadroom();
 					}
 					if (!frameRescueCreatedHeadroom) {
-						const rescue = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
+						await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
 							skipElide: fallbackFromShake,
 							hasProgress: () => {
 								// Only reached when a tier actually freed something, so the
@@ -5354,10 +5355,8 @@ export class SessionMaintenance {
 								return preparation !== undefined;
 							},
 						});
-						frameRescueEntry = rescue.compactionEntry ?? frameRescueEntry;
 					}
 				}
-				const frameRescueResult = frameRescue?.result;
 				if (!preparation) {
 					const noProgressDeadEnd = reason !== "idle" && !frameRescueCreatedHeadroom;
 					const implicatedFrames =
@@ -5396,7 +5395,6 @@ export class SessionMaintenance {
 								...frameRescueResult,
 								preserveData: snapcompact.stripPreservedArchive(frameRescueResult.preserveData),
 							},
-							tokensAfter: frameRescueEntry?.tokensAfter,
 							aborted: false,
 							willRetry: false,
 							skipped: frameRescueResult === undefined,
@@ -6171,7 +6169,6 @@ export class SessionMaintenance {
 			advisorResetReason: "auto-compaction",
 			detachExtensionEmit: detachPostCommit,
 		});
-		let committedCompactionEntry = savedCompactionEntry;
 
 		const result: CompactionResult = {
 			summary: args.summary,
@@ -6232,12 +6229,10 @@ export class SessionMaintenance {
 			// so use the looser fit budget.
 			retryFits = this.#compactionCreatedRetryFit();
 			if (!retryFits) {
-				const rescue = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
+				retryFits = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
 					skipElide: args.fallbackFromShake,
 					hasProgress: () => this.#compactionCreatedRetryFit(),
 				});
-				retryFits = rescue.hasProgress;
-				committedCompactionEntry = rescue.compactionEntry ?? committedCompactionEntry;
 			}
 			if (!retryFits) {
 				noProgressDeadEnd = true;
@@ -6252,12 +6247,10 @@ export class SessionMaintenance {
 			// from re-entering the same oversized context.
 			hasHeadroom = this.#compactionCreatedHeadroom();
 			if (!hasHeadroom) {
-				const rescue = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
+				hasHeadroom = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
 					skipElide: args.fallbackFromShake,
 					hasProgress: () => this.#compactionCreatedHeadroom(),
 				});
-				hasHeadroom = rescue.hasProgress;
-				committedCompactionEntry = rescue.compactionEntry ?? committedCompactionEntry;
 			}
 			if (!hasHeadroom) {
 				noProgressDeadEnd = true;
@@ -6293,14 +6286,7 @@ export class SessionMaintenance {
 		}
 
 		await this.#emitLifecycleEvent(
-			{
-				type: "auto_compaction_end",
-				action,
-				result,
-				tokensAfter: committedCompactionEntry?.tokensAfter,
-				aborted: false,
-				willRetry,
-			},
+			{ type: "auto_compaction_end", action, result, aborted: false, willRetry },
 			detachPostCommit,
 		);
 

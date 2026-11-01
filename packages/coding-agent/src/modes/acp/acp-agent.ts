@@ -352,7 +352,7 @@ function steeringQueueFromMeta(meta: unknown): "steering" | "followUp" {
 
 type AcpCompactionNotification = {
 	method: "_omp/compaction/start" | "_omp/compaction/end";
-	params: Record<string, string | number | boolean>;
+	params: Record<string, unknown>;
 };
 
 type ManagedSessionRecord = {
@@ -1790,46 +1790,42 @@ export class AcpAgent implements Agent {
 	}
 
 	#handleLifetimeEvent(record: ManagedSessionRecord, event: AgentSessionEvent): void {
+		const sessionId = record.protocolSessionId;
 		let notification: AcpCompactionNotification;
 		if (event.type === "auto_compaction_start") {
 			notification = {
 				method: "_omp/compaction/start",
-				params: {
-					sessionId: record.protocolSessionId,
-					reason: event.reason,
-					action: event.action,
-				},
+				params: { sessionId, reason: event.reason, action: event.action },
 			};
 		} else if (event.type === "auto_compaction_end") {
-			const params: AcpCompactionNotification["params"] = {
-				sessionId: record.protocolSessionId,
-				action: event.action,
-				aborted: event.aborted,
-				willRetry: event.willRetry,
+			// Undefined members drop out of the JSON-RPC payload.
+			notification = {
+				method: "_omp/compaction/end",
+				params: {
+					sessionId,
+					action: event.action,
+					aborted: event.aborted,
+					willRetry: event.willRetry,
+					skipped: event.skipped,
+					errorMessage: event.errorMessage,
+					tokensBefore: event.result?.tokensBefore,
+				},
 			};
-			if (event.skipped !== undefined) params.skipped = event.skipped;
-			if (event.errorMessage !== undefined) params.errorMessage = event.errorMessage;
-			const tokensBefore = event.result?.tokensBefore;
-			if (tokensBefore !== undefined) params.tokensBefore = tokensBefore;
-			if (event.tokensAfter !== undefined) params.tokensAfter = event.tokensAfter;
-			notification = { method: "_omp/compaction/end", params };
 		} else {
-			if (
-				record.lifetimeUpdatesReady &&
-				(event.type === "thinking_level_changed" || event.type === "model_changed")
-			) {
+			if (record.lifetimeUpdatesReady && (event.type === "thinking_level_changed" || event.type === "model_changed")) {
 				this.#trackLifetimeDelivery(record, event.type, this.#pushConfigOptionUpdate(record));
 			}
 			return;
 		}
+		// Compaction transitions cannot be rebuilt from a snapshot, so buffer them until delivery opens.
+		if (record.lifetimeUpdatesReady) this.#deliverCompactionNotification(record, notification);
+		else (record.pendingCompactionNotifications ??= []).push(notification);
+	}
 
-		if (!record.lifetimeUpdatesReady) {
-			(record.pendingCompactionNotifications ??= []).push(notification);
-			return;
-		}
+	#deliverCompactionNotification(record: ManagedSessionRecord, notification: AcpCompactionNotification): void {
 		this.#trackLifetimeDelivery(
 			record,
-			event.type,
+			notification.method,
 			this.#connection.extNotification(notification.method, notification.params),
 		);
 	}
@@ -1839,14 +1835,7 @@ export class AcpAgent implements Agent {
 		record.lifetimeUpdatesReady = true;
 		const pending = record.pendingCompactionNotifications;
 		record.pendingCompactionNotifications = undefined;
-		if (!pending) return;
-		for (const notification of pending) {
-			this.#trackLifetimeDelivery(
-				record,
-				notification.method,
-				this.#connection.extNotification(notification.method, notification.params),
-			);
-		}
+		for (const notification of pending ?? []) this.#deliverCompactionNotification(record, notification);
 	}
 
 	#trackLifetimeDelivery(record: ManagedSessionRecord, eventType: string, delivery: Promise<void>): void {
