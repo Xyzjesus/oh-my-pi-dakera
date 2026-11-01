@@ -17,6 +17,7 @@ import {
 	mergeTaskBranches,
 	parseIsolationBackend,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
+import { readRetainedMountBackend } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
@@ -73,6 +74,52 @@ describe("worktree isolation helpers", () => {
 		expect(parseIsolationBackend("projfs")).toBe(natives.IsoBackendKind.Projfs);
 		expect(parseIsolationBackend("block-clone")).toBe(natives.IsoBackendKind.WindowsBlockClone);
 		expect(parseIsolationBackend("rcopy")).toBe(natives.IsoBackendKind.Rcopy);
+	});
+
+	// #17644: a failed fuse-overlayfs unmount used to be followed by `rm -rf`
+	// of the base dir, deleting `upper/`/`work/` under the live mount and
+	// leaving `omp worktree clear` no sidecar to route native teardown through.
+	it("retains a mount workspace with its backend sidecar when native stop fails", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cleanup-"));
+		tempDirs.push(root);
+		const stopError = new Error("fusermount3 -u -z (exit 1): Device or resource busy");
+		vi.spyOn(natives, "isoStop").mockRejectedValue(stopError);
+
+		const mounted = path.join(root, "overlay");
+		await fs.mkdir(path.join(mounted, "m"), { recursive: true });
+		await fs.mkdir(path.join(mounted, "upper"));
+		await cleanupIsolation({
+			mergedDir: path.join(mounted, "m"),
+			backend: natives.IsoBackendKind.Overlayfs,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		expect((await fs.readdir(mounted)).sort()).toEqual([".omp-retained-backend.json", "m", "upper"]);
+		expect(await readRetainedMountBackend(mounted)).toBe(natives.IsoBackendKind.Overlayfs);
+
+		// Sidecar write fails (a directory squats its path): still kept, no throw.
+		const unrecorded = path.join(root, "unrecorded");
+		await fs.mkdir(path.join(unrecorded, "m"), { recursive: true });
+		await fs.mkdir(path.join(unrecorded, "upper"));
+		await fs.mkdir(path.join(unrecorded, ".omp-retained-backend.json"));
+		await cleanupIsolation({
+			mergedDir: path.join(unrecorded, "m"),
+			backend: natives.IsoBackendKind.Overlayfs,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		expect(await fs.exists(path.join(unrecorded, "upper"))).toBe(true);
+
+		// Copy backends have no mount to traverse: removal still proceeds.
+		const copied = path.join(root, "rcopy");
+		await fs.mkdir(path.join(copied, "m"), { recursive: true });
+		await cleanupIsolation({
+			mergedDir: path.join(copied, "m"),
+			backend: natives.IsoBackendKind.Rcopy,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		expect(await fs.exists(copied)).toBe(false);
 	});
 
 	// Regression for #8939: baseline capture buffered every untracked byte into
