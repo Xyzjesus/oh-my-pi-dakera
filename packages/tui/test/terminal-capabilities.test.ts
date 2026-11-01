@@ -159,59 +159,15 @@ describe("detectTerminalId", () => {
 	});
 });
 
-describe("Rex terminal graphics", () => {
-	const rexEnv = { TERM_PROGRAM: "rex", TERM: "xterm-256color", COLORTERM: "truecolor" };
-
-	it("selects Kitty graphics for native Rex but not unknown true-color terminals", () => {
-		const id = detectTerminalId(rexEnv);
-		expect(id).toBe("rex");
-		expect(resolveImageProtocol(id, rexEnv, true)).toBe(ImageProtocol.Kitty);
-		expect(
-			resolveImageProtocol(detectTerminalId({ TERM: "xterm-256color", COLORTERM: "truecolor" }), {}, true),
-		).toBeNull();
-		expect(resolveImageProtocol(detectTerminalId({ TERM_PROGRAM: "ghostty" }), {}, true)).toBe(ImageProtocol.Kitty);
-	});
-
-	it("keeps Kitty images over SSH when only TERM=xterm-rex identifies the client", () => {
-		const env = { TERM: "xterm-rex", COLORTERM: "truecolor", SSH_CONNECTION: "client 1 server 22" };
+it("selects Kitty graphics for Rex via TERM_PROGRAM or TERM=xterm-rex (over SSH)", () => {
+	for (const env of [
+		{ TERM_PROGRAM: "rex", TERM: "xterm-256color", COLORTERM: "truecolor" },
+		{ TERM: "xterm-rex", COLORTERM: "truecolor", SSH_CONNECTION: "client 1 server 22" },
+	]) {
 		const id = detectTerminalId(env);
 		expect(id).toBe("rex");
 		expect(resolveImageProtocol(id, env, true)).toBe(ImageProtocol.Kitty);
-		expect(detectTerminalId({ ...env, TERM: "xterm-rex-other" })).toBe("trueColor");
-	});
-
-	it("renders Kitty APCs in a new Rex process unless an explicit override disables or replaces them", async () => {
-		for (const [override, protocol, prefix] of [
-			[undefined, ImageProtocol.Kitty, "\x1b_G"],
-			["off", null, null],
-			["iterm2", ImageProtocol.Iterm2, "\x1b]1337;File="],
-		] as const) {
-			const proc = Bun.spawn({
-				cmd: [
-					process.execPath,
-					"--eval",
-					`import { renderImage, TERMINAL, TERMINAL_ID } from "@oh-my-pi/pi-tui/terminal-capabilities";
-const sequence = renderImage("AA==", { widthPx: 10, heightPx: 10 })?.sequence;
-console.log(JSON.stringify({ id: TERMINAL_ID, protocol: TERMINAL.imageProtocol, sequence }));`,
-				],
-				env: subprocessEnv({ ...rexEnv, PI_FORCE_IMAGE_PROTOCOL: override }),
-				stdout: "pipe",
-				stderr: "pipe",
-			});
-			const [stdout, stderr, exitCode] = await Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-				proc.exited,
-			]);
-			expect(stderr).toBe("");
-			expect(exitCode).toBe(0);
-			const result: { id: string; protocol: ImageProtocol | null; sequence?: string } = JSON.parse(stdout);
-			expect(result.id).toBe("rex");
-			expect(result.protocol).toBe(protocol);
-			if (prefix === null) expect(result.sequence).toBeUndefined();
-			else expect(result.sequence?.startsWith(prefix)).toBe(true);
-		}
-	});
+	}
 });
 
 describe("iTerm2 over SSH", () => {

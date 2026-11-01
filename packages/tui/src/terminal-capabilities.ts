@@ -627,8 +627,7 @@ const KNOWN_TERMINALS = Object.freeze({
 	// OSC 99, and OSC 66 text sizing are outside rio's supported set and keep
 	// the conservative defaults.
 	rio: new TerminalInfo("rio", ImageProtocol.Kitty, true, true),
-	// Rex identifies via TERM_PROGRAM=rex or TERM=xterm-rex. Its Kitty graphics
-	// transport is confirmed; other terminal capabilities stay unassumed.
+	// Rex (TERM_PROGRAM=rex / TERM=xterm-rex): only Kitty graphics is confirmed.
 	rex: new TerminalInfo("rex", ImageProtocol.Kitty, true, false),
 	// Tern (Stencil's terminal, `stencil-term`) sets TERM_PROGRAM=tern and
 	// implements Kitty graphics, OSC 8 and OSC 9/99 notifications. Whether omp
