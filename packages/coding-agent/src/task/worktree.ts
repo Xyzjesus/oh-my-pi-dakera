@@ -10,7 +10,7 @@ import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
-import { writeIsolationOwner } from "./isolation-ownership";
+import { needsNativeTeardown, writeIsolationOwner, writeRetainedBackend } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
 
@@ -697,23 +697,34 @@ export async function ensureIsolation(
 	throw new Error(fallbackReason ?? "No isolation backend is available.");
 }
 
-/** Tear down a handle returned by {@link ensureIsolation}. */
+/**
+ * Tear down a handle returned by {@link ensureIsolation}.
+ *
+ * When native teardown fails for a backend that needs it (a mount or Btrfs
+ * subvolume), the workspace is kept with a retained-backend sidecar instead
+ * of removed: recursive `rm` would traverse the still-live mount, delete the
+ * overlay's `upper`/`work` from under it, and fail on the mountpoint. Once
+ * this process exits, `omp worktree clear` reruns native teardown on it.
+ */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
+	// baseDir is the parent of the merged directory
+	const baseDir = path.dirname(handle.mergedDir);
 	try {
-		try {
-			await natives.isoStop(handle.backend, handle.mergedDir);
-		} catch (err) {
-			logger.warn("isolation backend stop failed during cleanup", {
-				backend: handle.backend,
-				mergedDir: handle.mergedDir,
-				error: err instanceof Error ? err.message : String(err),
-			});
+		await natives.isoStop(handle.backend, handle.mergedDir);
+	} catch (err) {
+		const retain = needsNativeTeardown(handle.backend);
+		logger.warn("isolation backend stop failed during cleanup", {
+			backend: handle.backend,
+			mergedDir: handle.mergedDir,
+			error: err instanceof Error ? err.message : String(err),
+			retained: retain,
+		});
+		if (retain) {
+			await writeRetainedBackend(baseDir, handle.backend);
+			return;
 		}
-	} finally {
-		// baseDir is the parent of the merged directory
-		const baseDir = path.dirname(handle.mergedDir);
-		await fs.rm(baseDir, { recursive: true, force: true });
 	}
+	await fs.rm(baseDir, { recursive: true, force: true });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
