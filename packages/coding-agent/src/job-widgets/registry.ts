@@ -118,30 +118,47 @@ export class JobWidgets implements JobWidgetRegistry {
 			this.#syncTimer();
 			return undefined;
 		}
-		let entry = this.#entries.get(job.id);
-		if (!entry || entry.job !== job) {
-			entry?.request?.abort();
-			entry?.captionRequest?.abort();
-			const runtime = new JobWidgetRuntime(undefined, job.startTime, this.#now);
-			entry = {
-				job,
-				runtime,
-				view: runtime.view({ label: job.intent || job.label, authoring: false }),
-				viewKey: "",
-				lastIngestAt: Number.NEGATIVE_INFINITY,
-				shown: false,
-				frozen: false,
-				attempts: 0,
-				authorUnavailable: false,
-				specHadWatch: false,
-				captionAsked: false,
-			};
-			this.#entries.set(job.id, entry);
-		}
+		const entry = this.#entry(job);
 		entry.shown = true;
 		this.#refresh(entry, false);
 		this.#syncTimer();
 		return entry.view;
+	}
+
+	requestCaption(job: AsyncJob): void {
+		if (this.#disposed || !job.widgetInputs || !this.#enabled() || job.status !== "running") return;
+		let brief: JobWidgetBrief;
+		try {
+			brief = job.widgetInputs.brief();
+		} catch (error) {
+			logger.warn("Job caption brief failed", { jobId: job.id, error: String(error) });
+			return;
+		}
+		this.#maybeCaption(this.#entry(job), brief, this.#now());
+	}
+
+	/** The job's entry, made fresh for a job not seen before or a new job reusing an id. */
+	#entry(job: AsyncJob): WidgetEntry {
+		const existing = this.#entries.get(job.id);
+		if (existing?.job === job) return existing;
+		existing?.request?.abort();
+		existing?.captionRequest?.abort();
+		const runtime = new JobWidgetRuntime(undefined, job.startTime, this.#now);
+		const entry: WidgetEntry = {
+			job,
+			runtime,
+			view: runtime.view({ label: job.intent || job.label, authoring: false }),
+			viewKey: "",
+			lastIngestAt: Number.NEGATIVE_INFINITY,
+			shown: false,
+			frozen: false,
+			attempts: 0,
+			authorUnavailable: false,
+			specHadWatch: false,
+			captionAsked: false,
+		};
+		this.#entries.set(job.id, entry);
+		return entry;
 	}
 
 	subscribe(listener: () => void): () => void {
@@ -244,9 +261,13 @@ export class JobWidgets implements JobWidgetRegistry {
 		void this.#writeSpec(entry, brief, previous);
 	}
 
-	/** Ask once for a caption of a command that needs explaining, once the job is old enough to be worth one. */
+	/**
+	 * Ask once for a caption of a command that needs explaining, once the job
+	 * is old enough to be worth one. Reached only for a job someone looks at:
+	 * a shown widget, or a listing ({@link requestCaption}).
+	 */
 	#maybeCaption(entry: WidgetEntry, brief: JobWidgetBrief, now: number): void {
-		if (entry.captionAsked || !this.#captioner || !entry.shown) return;
+		if (entry.captionAsked || !this.#captioner) return;
 		if (brief.kind !== "bash" || !brief.command) return;
 		if (now - entry.job.startTime < this.#options.authorAfterMs || this.#inFlight >= this.#options.maxInFlight) {
 			return;

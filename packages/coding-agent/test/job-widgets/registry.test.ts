@@ -339,6 +339,38 @@ describe("job widget registry", () => {
 		expect(briefs).toHaveLength(1);
 		unsubscribe();
 	});
+
+	it("captions a listed command whose widget was never shown, without authoring a widget", async () => {
+		const manager = new AsyncJobManager({});
+		managers.push(manager);
+		let offset = 0;
+		const { calls, author } = scriptedAuthor();
+		const commands: (string | undefined)[] = [];
+		const widgets = new JobWidgets({
+			author,
+			now: () => Date.now() + offset,
+			minIngestMs: 0,
+			captioner: async brief => {
+				commands.push(brief.command);
+				return "Waits about 2 min, printing a tick every 3s";
+			},
+		});
+		const { job, tap } = startJob(manager, "i=0; while [ $i -lt 40 ]; do echo tick $i; sleep 3; i=$((i+1)); done");
+		tap.append("tick 0\ntick 1\ntick 2\ntick 3\n");
+		widgets.requestCaption(job);
+		expect(commands).toHaveLength(0);
+
+		offset = 15_000;
+		widgets.requestCaption(job);
+		await settle();
+		expect(commands).toEqual([job.label]);
+		expect(job.caption).toBe("Waits about 2 min, printing a tick every 3s");
+		expect(calls).toHaveLength(0);
+
+		widgets.requestCaption(job);
+		widgets.view(job);
+		expect(commands).toHaveLength(1);
+	});
 });
 
 describe("job caption replies", () => {

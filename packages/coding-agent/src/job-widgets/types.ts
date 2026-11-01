@@ -74,6 +74,13 @@ export interface JobWidgetRegistry {
 	 * model start writing its spec.
 	 */
 	view(job: AsyncJob): JobWidgetView | undefined;
+	/**
+	 * Asks for the caption of a running command's job (`AsyncJob.caption`)
+	 * without showing its widget, for a listing that prints the command; the
+	 * caption shows on a later listing. Asks at most once per job, and not
+	 * for a job younger than the caption delay or with widgets turned off.
+	 */
+	requestCaption(job: AsyncJob): void;
 	/** Called after a background refresh changed a shown widget, so a surface that is not polling repaints. */
 	subscribe(listener: () => void): () => void;
 	/** Drops a job's widget, once its row is evicted. */
