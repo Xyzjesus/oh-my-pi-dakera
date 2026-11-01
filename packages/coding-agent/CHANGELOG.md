@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- In a source checkout, the error for a missing HTML export viewer now names the script that builds it, `packages/collab-web/scripts/build-export-viewer.ts`, beside `bun gen:export-viewer` ([#17636](https://github.com/can1357/oh-my-pi/pull/17636) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
