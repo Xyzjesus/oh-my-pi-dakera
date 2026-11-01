@@ -3909,6 +3909,10 @@
 				"result": {
 					"$ref": "#/$defs/CompactionResult"
 				},
+				"tokensAfter": {
+					"type": "number",
+					"description": "Context-token projection stored on this pass's committed compaction entry."
+				},
 				"errorMessage": {
 					"type": "string"
 				},
