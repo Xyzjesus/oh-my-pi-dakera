@@ -4,10 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { clearWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
-import * as ownership from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import {
 	ISOLATION_OWNER_FILE,
-	isMountPoint,
 	RETAINED_BACKEND_FILE,
 	writeIsolationOwner,
 	writeRetainedBackend,
@@ -135,27 +133,6 @@ describe("worktree clear task-isolation ownership", () => {
 		expect(failed).toBe(1);
 
 		expect(await Bun.file(path.join(retained, "m", "work.txt")).exists()).toBe(true);
-	});
-
-	// #17644: when unmount and the sidecar write both fail at task cleanup, the
-	// live mount has no record; `clear` must not recurse through it.
-	it("keeps a sidecar-less workspace whose mount dir is still mounted", async () => {
-		const mounted = await makeSandbox("tlive0011");
-		await Bun.write(
-			path.join(mounted, ISOLATION_OWNER_FILE),
-			JSON.stringify({ pid: await deadPid(), id: "live0011" }),
-		);
-		const mountDir = path.join(mounted, "m");
-		vi.spyOn(ownership, "isMountPoint").mockImplementation(async dir => dir === mountDir);
-
-		const { failed } = await clearWorktrees({ all: false, dryRun: false, json: true });
-		expect(failed).toBe(1);
-		expect(await Bun.file(path.join(mountDir, "work.txt")).exists()).toBe(true);
-	});
-
-	it.if(process.platform === "linux")("detects live mount points from mountinfo", async () => {
-		expect(await isMountPoint("/proc")).toBe(true);
-		expect(await isMountPoint(path.join(base, "not-a-mount"))).toBe(false);
 	});
 
 	it("keeps workspaces whose retained-mount metadata is unreadable", async () => {

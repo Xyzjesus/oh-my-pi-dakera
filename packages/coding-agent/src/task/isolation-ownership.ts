@@ -6,7 +6,6 @@
  * it. `omp worktree clear` consults the marker so it can distinguish a live
  * subagent's sandbox from a crashed run's leftover instead of deleting both.
  */
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { $ } from "bun";
@@ -165,28 +164,4 @@ export async function readRetainedMountBackend(dir: string): Promise<number | un
 	}
 	if (!needsNativeTeardown(backend)) return undefined;
 	return backend;
-}
-
-/**
- * Whether `dir` is an active mount point in this process's mount namespace,
- * per Linux `/proc/self/mountinfo`; always false on other platforms.
- *
- * The guard `omp worktree clear` falls back to when a workspace has no
- * retained-backend sidecar (e.g. writing it failed after a failed unmount):
- * recursive removal through a live overlay would delete its upper layer.
- * Only the parent is canonicalised — a dead FUSE mount point itself fails
- * `lstat` with `ENOTCONN`.
- *
- * @throws when the parent dir or `/proc/self/mountinfo` cannot be read, so
- * callers fail closed instead of treating the path as unmounted.
- */
-export async function isMountPoint(dir: string): Promise<boolean> {
-	if (process.platform !== "linux") return false;
-	const target = path.join(await fs.realpath(path.dirname(dir)), path.basename(dir));
-	const mountinfo = await Bun.file("/proc/self/mountinfo").text();
-	return mountinfo.split("\n").some(line => {
-		const mountPoint = line.split(" ")[4];
-		// The kernel octal-escapes space, tab, newline, and backslash.
-		return mountPoint?.replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8))) === target;
-	});
 }

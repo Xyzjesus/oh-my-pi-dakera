@@ -698,18 +698,11 @@ export async function ensureIsolation(
 }
 
 /**
- * Tear down a handle returned by {@link ensureIsolation}.
- *
- * When native teardown fails for a backend that needs it (a mount or Btrfs
- * subvolume), the workspace is kept with a retained-backend sidecar instead
- * of removed: recursive `rm` would traverse the still-live mount, delete the
- * overlay's `upper`/`work` from under it, and fail on the mountpoint. Once
- * this process exits, `omp worktree clear` reruns native teardown on it. If
- * the sidecar cannot be written either, the workspace is still kept and
- * `clear` refuses it while it is mounted (see `stopRetainedMount`).
+ * Tear down a handle returned by {@link ensureIsolation}. When native teardown fails for a mount or
+ * subvolume backend, the workspace is kept with a retained-backend sidecar (recursive `rm` would
+ * traverse the live mount); `omp worktree clear` retries the teardown later.
  */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
-	// baseDir is the parent of the merged directory
 	const baseDir = path.dirname(handle.mergedDir);
 	try {
 		await natives.isoStop(handle.backend, handle.mergedDir);

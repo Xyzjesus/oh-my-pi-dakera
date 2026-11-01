@@ -23,12 +23,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
-import {
-	hasLiveIsolationOwner,
-	ISOLATION_OWNER_FILE,
-	isMountPoint,
-	readRetainedMountBackend,
-} from "../task/isolation-ownership";
+import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
@@ -77,26 +72,15 @@ export interface ClearWorktreesOptions {
  * layer entry by entry and then fails on the mountpoint itself (likewise a
  * Btrfs subvolume root, removable only via subvolume delete) — and mounts
  * survive the owning session, so the reclaim path (unlike teardown) cannot
- * rely on the creator to stop them. Without a retained-backend sidecar it
- * returns false, unless a mount dir is still a live mount point (the sidecar
- * write failed after a failed unmount): that throws with a manual-unmount
- * hint. It also throws when the sidecar cannot be read or teardown itself
- * fails, so the caller skips removal instead of traversing a possibly live
- * mount — the entry is then reported failed with the error, data intact.
+ * rely on the creator to stop them. Side-effect-free without a retained-
+ * backend sidecar (returns false); throws when the sidecar cannot be read
+ * or teardown itself fails, so the caller skips removal instead of
+ * traversing a possibly live mount — the entry is then reported failed
+ * with the error, data intact.
  */
 export async function stopRetainedMount(dir: string): Promise<boolean> {
 	const backend = await readRetainedMountBackend(dir);
-	if (backend === undefined) {
-		for (const name of TASK_ISOLATION_MOUNT_DIRS) {
-			const candidate = path.join(dir, name);
-			if (await isMountPoint(candidate)) {
-				throw new Error(
-					`${candidate} is still mounted but has no retained-backend record; unmount it manually (\`fusermount3 -u -z\` for fuse-overlayfs, \`umount -l\` otherwise) and rerun \`omp worktree clear\``,
-				);
-			}
-		}
-		return false;
-	}
+	if (backend === undefined) return false;
 	for (const name of TASK_ISOLATION_MOUNT_DIRS) {
 		const candidate = path.join(dir, name);
 		if (
