@@ -116,11 +116,14 @@ describe.skipIf(process.platform === "win32")("run-rs-task.ts check:rs", () => {
 
 	// Failure mode: omp exports CI=true into every agent command, so every agent's
 	// `bun check` on a TypeScript-only change pays a full `cargo clippy --workspace`;
-	// or the gate skips without saying so.
+	// or the gate skips without saying so. Both trunks are fetched and agree, as in
+	// a fork contributor's clone.
 	test(
 		"a TypeScript-only commit skips the Rust half under CI=true and says why",
 		async () => {
 			const fixture = await makeFixture();
+			await git(fixture.work, "remote", "add", "upstream", `file://${fixture.origin}`);
+			await git(fixture.work, "fetch", "-q", "upstream");
 			await git(fixture.work, "switch", "-q", "--detach");
 			await commitFile(fixture.work, "packages/app/src/a.ts", "export const a = 3;\n", "ts change");
 
@@ -129,6 +132,7 @@ describe.skipIf(process.platform === "win32")("run-rs-task.ts check:rs", () => {
 			expect(result.cargoRan).toBe(false);
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toContain("Skipping check:rs");
+			expect(result.output).toContain("upstream/main");
 			expect(result.output).toContain("origin/main");
 		},
 		CASE_TIMEOUT_MS,
@@ -201,45 +205,28 @@ describe.skipIf(process.platform === "win32")("run-rs-task.ts check:rs", () => {
 		CASE_TIMEOUT_MS,
 	);
 
-	// Failure mode: a gate that gives up on every shallow clone charges the full Rust
-	// half, on every `bun check`, to anyone who cloned with `--depth`.
+	// Failure mode: in a shallow clone `git merge-base` can succeed with an older base
+	// than the real one. Here the feature branch (B-X-Q-P-H, with H also merging S off
+	// B) undoes main's Rust commit X; `--depth 3` cuts Q off from X, so the only base
+	// left is B, the B-to-H diff is TypeScript only, and the gate would skip.
 	test(
-		"a shallow clone that reaches its merge base skips a TypeScript-only commit",
+		"a shallow clone runs the Rust gate even when an older merge base diffs clean",
 		async () => {
 			const fixture = await makeFixture();
+			const origin = fixture.origin;
+			await commitFile(origin, "crates/x/src/lib.rs", "pub fn x() -> u8 { 2 }\n", "X: main changes Rust");
+			await git(origin, "switch", "-q", "-c", "side", "HEAD~1");
+			await commitFile(origin, "packages/app/src/b.ts", "export const b = 1;\n", "S");
+			await git(origin, "switch", "-q", "-c", "feature", "main");
+			await commitFile(origin, "packages/app/src/c.ts", "export const c = 1;\n", "Q");
+			await commitFile(origin, "packages/app/src/c.ts", "export const c = 2;\n", "P");
+			await git(origin, "merge", "-q", "--no-ff", "--no-commit", "side");
+			await Bun.write(path.join(origin, "crates/x/src/lib.rs"), "pub fn x() {}\n");
+			await git(origin, "add", "-A");
+			await git(origin, "commit", "-q", "-m", "H: merges S and undoes X");
+			await git(origin, "switch", "-q", "main");
 			const shallow = path.join(fixture.root, "shallow");
-			await git(fixture.root, "clone", "-q", "--depth", "1", `file://${fixture.origin}`, shallow);
-			await commitFile(shallow, "packages/app/src/a.ts", "export const a = 3;\n", "ts change");
-
-			const result = await runCheckRs(fixture, shallow);
-
-			expect(result.cargoRan).toBe(false);
-			expect(result.output).toContain("Skipping check:rs");
-		},
-		CASE_TIMEOUT_MS,
-	);
-
-	// Failure mode: actions/checkout clones at depth 1 by default. A gate that read
-	// "no common ancestor in the fetched history" as "no change" would switch off the
-	// Rust gate there; one that ran without saying how to stop it would run forever.
-	test(
-		"a shallow clone cut above its merge base runs the Rust gate and names the cure",
-		async () => {
-			const fixture = await makeFixture();
-			await git(fixture.origin, "switch", "-q", "-c", "feature", "HEAD~1");
-			await commitFile(fixture.origin, "packages/app/src/a.ts", "export const a = 3;\n", "ts change");
-			await git(fixture.origin, "switch", "-q", "main");
-			const shallow = path.join(fixture.root, "shallow");
-			await git(
-				fixture.root,
-				"clone",
-				"-q",
-				"--depth",
-				"1",
-				"--no-single-branch",
-				`file://${fixture.origin}`,
-				shallow,
-			);
+			await git(fixture.root, "clone", "-q", "--depth", "3", "--no-single-branch", `file://${origin}`, shallow);
 			await git(shallow, "switch", "-q", "feature");
 
 			const result = await runCheckRs(fixture, shallow);
@@ -247,6 +234,45 @@ describe.skipIf(process.platform === "win32")("run-rs-task.ts check:rs", () => {
 			expect(result.cargoRan).toBe(true);
 			expect(result.output).toContain("shallow clone");
 			expect(result.output).toContain("git fetch --unshallow");
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: a fork contributor adds `upstream` but never fetches it, and
+	// `origin/main` (their fork's main) already holds the unchecked Rust commit; a
+	// gate that falls back to `origin/main` finds nothing to check.
+	test(
+		"an upstream remote with no fetched main runs the Rust gate, whatever origin/main holds",
+		async () => {
+			const fixture = await makeFixture();
+			await commitFile(fixture.origin, "crates/x/src/lib.rs", "pub fn x() -> u8 { 4 }\n", "rust on origin main");
+			await git(fixture.work, "fetch", "-q", "origin");
+			await git(fixture.work, "merge", "-q", "--ff-only", "origin/main");
+			await git(fixture.work, "remote", "add", "upstream", `file://${fixture.root}/never-fetched`);
+
+			const result = await runCheckRs(fixture, fixture.work);
+
+			expect(result.cargoRan).toBe(true);
+			expect(result.output).toContain("git fetch upstream main");
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: an `upstream/main` that points somewhere unexpected (here, at
+	// HEAD) wins over `origin/main` and hides the Rust change `origin/main...HEAD` shows.
+	test(
+		"a Rust change against origin/main runs the Rust gate even when upstream/main disagrees",
+		async () => {
+			const fixture = await makeFixture();
+			await git(fixture.work, "switch", "-q", "-c", "feature");
+			await commitFile(fixture.work, "crates/x/src/lib.rs", "pub fn x() -> u8 { 5 }\n", "rust change");
+			await git(fixture.work, "remote", "add", "upstream", `file://${fixture.origin}`);
+			await git(fixture.work, "update-ref", "refs/remotes/upstream/main", "HEAD");
+
+			const result = await runCheckRs(fixture, fixture.work);
+
+			expect(result.cargoRan).toBe(true);
+			expect(result.output).toContain("origin/main");
 		},
 		CASE_TIMEOUT_MS,
 	);

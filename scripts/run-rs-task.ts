@@ -14,10 +14,12 @@ const RUST_AFFECTING_FILE_NAMES = [
 	"rustfmt.toml",
 	".rustfmt.toml",
 ] as const satisfies readonly string[];
-// The trunk a checkout is measured against, in order of preference: a fork's
-// `upstream` remote, then `origin`. Remote-tracking refs only, because a local
-// `main` can carry the very commits being checked.
-const TRUNK_REFS = ["upstream/main", "origin/main"] as const satisfies readonly string[];
+// The trunks a checkout is measured against: `main` on a fork's `upstream` remote
+// and on `origin`. Remote-tracking refs only, because a local `main` can carry the
+// very commits being checked. Each of these remotes that is configured must have
+// its `main` fetched, and the task runs if the branch changed Rust against any of
+// them: a missing or disagreeing trunk is uncertainty, not evidence.
+const TRUNK_REMOTES = ["upstream", "origin"] as const satisfies readonly string[];
 // Vendored path-patched crates are workspace members for Bazel hermeticity
 // (path-patch rendering is machine-local), but cargo dev tasks keep their
 // historical scope: the forks are not held to workspace format/lint/test gates.
@@ -121,8 +123,15 @@ interface RunDecision {
 	reason: string;
 }
 
+interface TrunkChanges {
+	trunk: string;
+	base: string;
+	/** Rust-affecting paths changed since `base`, committed or not. */
+	rustPaths: string[];
+}
+
 type BranchChanges =
-	| { trunk: string; base: string; paths: string[] }
+	| { trunks: TrunkChanges[] }
 	/** `cure`, when known, is a command after which the next run can decide. */
 	| { unknown: string; cure?: string };
 
@@ -147,16 +156,19 @@ async function decideWhetherToRun(): Promise<RunDecision> {
 		return { run: true, reason: `cannot tell what this checkout changed (${changes.unknown}).${cure}` };
 	}
 
-	const since = `since ${changes.base.slice(0, 12)}, the merge base with ${changes.trunk}`;
-	const rustPaths = changes.paths.filter(isRustAffectingPath);
-	if (rustPaths.length === 0) {
+	const changed = changes.trunks.find(trunk => trunk.rustPaths.length > 0);
+	if (changed === undefined) {
+		const since = changes.trunks.map(trunk => `${trunk.base.slice(0, 12)}, the merge base with ${trunk.trunk}`);
 		return {
 			run: false,
-			reason: `no Rust-affecting change ${since}, committed or uncommitted. Set OMP_FORCE_RUST_TASKS=1 to run it anyway.`,
+			reason: `no Rust-affecting change since ${since.join(", and since ")}, committed or uncommitted. Set OMP_FORCE_RUST_TASKS=1 to run it anyway.`,
 		};
 	}
-	const more = rustPaths.length > 1 ? ` and ${rustPaths.length - 1} more` : "";
-	return { run: true, reason: `${rustPaths[0]}${more} changed ${since}.` };
+	const more = changed.rustPaths.length > 1 ? ` and ${changed.rustPaths.length - 1} more` : "";
+	return {
+		run: true,
+		reason: `${changed.rustPaths[0]}${more} changed since ${changed.base.slice(0, 12)}, the merge base with ${changed.trunk}.`,
+	};
 }
 
 function isEnabled(value: string | undefined): boolean {
@@ -166,50 +178,49 @@ function isEnabled(value: string | undefined): boolean {
 }
 
 /**
- * Paths this checkout changed relative to the trunk: everything committed since
+ * What this checkout changed relative to each trunk: everything committed since
  * the merge base (never a two-dot diff against the trunk's tip, which would count
  * the trunk's own newer commits as the branch's), plus staged, unstaged and
  * untracked files. Whatever git cannot answer comes back as `unknown`.
  */
 async function collectBranchChanges(): Promise<BranchChanges> {
-	const refs = await git("for-each-ref", "--format=%(refname)", ...TRUNK_REFS.map(ref => `refs/remotes/${ref}`));
-	if (!refs.ok) return { unknown: refs.error };
-	const present = new Set(refs.text.split("\n"));
-	const trunk = TRUNK_REFS.find(ref => present.has(`refs/remotes/${ref}`));
-	if (trunk === undefined) {
+	const shallow = await git("rev-parse", "--is-shallow-repository");
+	if (!shallow.ok) return { unknown: shallow.error };
+	// A shallow clone can hide the true merge base and still hand back an older one,
+	// against which a branch that reverts main's newer Rust commit diffs clean.
+	if (shallow.text.trim() === "true") return { unknown: "shallow clone", cure: "git fetch --unshallow" };
+
+	const remotes = await git("remote");
+	if (!remotes.ok) return { unknown: remotes.error };
+	const configured = new Set(remotes.text.split("\n"));
+	const trunkRemotes = TRUNK_REMOTES.filter(remote => configured.has(remote));
+	if (trunkRemotes.length === 0) {
 		return {
-			unknown: `no ${TRUNK_REFS.join(" or ")} ref to diff against`,
+			unknown: `no ${TRUNK_REMOTES.join(" or ")} remote to diff against`,
 			cure: "git remote add upstream https://github.com/can1357/oh-my-pi && git fetch upstream main",
 		};
 	}
 
-	// In a shallow clone `merge-base` still answers when the fetched history holds a
-	// common ancestor; when the cut hides every one, it finds none and the diff is unknown.
-	const mergeBase = await git("merge-base", "HEAD", `refs/remotes/${trunk}`);
-	if (!mergeBase.ok) {
-		const shallow = await git("rev-parse", "--is-shallow-repository");
-		if (shallow.ok && shallow.text.trim() === "true") {
-			return {
-				unknown: `this shallow clone does not reach its merge base with ${trunk}`,
-				cure: "git fetch --unshallow",
-			};
-		}
-		return { unknown: `no merge base between HEAD and ${trunk}` };
-	}
-	const base = mergeBase.text.trim();
-
-	// `--no-renames` reports both sides of a rename, so moving a file out of a crate still counts.
-	const committed = await git("diff", "--no-renames", "--name-only", "-z", base, "HEAD");
-	if (!committed.ok) return { unknown: committed.error };
 	// `--untracked-files=all` lists a new crate's files instead of one `crates/new/` entry.
-	const uncommitted = await git("status", "--porcelain", "-z", "--untracked-files=all");
-	if (!uncommitted.ok) return { unknown: uncommitted.error };
+	const status = await git("status", "--porcelain", "-z", "--untracked-files=all");
+	if (!status.ok) return { unknown: status.error };
+	const uncommitted = getChangedPathsFromPorcelain(status.text);
 
-	return {
-		trunk,
-		base,
-		paths: [...committed.text.split("\0").filter(Boolean), ...getChangedPathsFromPorcelain(uncommitted.text)],
-	};
+	const trunks: TrunkChanges[] = [];
+	for (const remote of trunkRemotes) {
+		const trunk = `${remote}/main`;
+		const tip = await git("rev-parse", "--verify", "--quiet", `refs/remotes/${trunk}^{commit}`);
+		if (!tip.ok) return { unknown: `the ${remote} remote has no fetched main`, cure: `git fetch ${remote} main` };
+		const mergeBase = await git("merge-base", "HEAD", tip.text.trim());
+		if (!mergeBase.ok) return { unknown: `no merge base between HEAD and ${trunk}` };
+		const base = mergeBase.text.trim();
+		// `--no-renames` reports both sides of a rename, so moving a file out of a crate still counts.
+		const committed = await git("diff", "--no-renames", "--name-only", "-z", base, "HEAD");
+		if (!committed.ok) return { unknown: committed.error };
+		const paths = [...committed.text.split("\0").filter(Boolean), ...uncommitted];
+		trunks.push({ trunk, base, rustPaths: paths.filter(isRustAffectingPath) });
+	}
+	return { trunks };
 }
 
 async function git(...args: string[]): Promise<GitResult> {
