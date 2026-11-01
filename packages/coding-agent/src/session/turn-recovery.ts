@@ -2078,16 +2078,12 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Moves off a model whose provider has no usable credential (logged out,
-	 * refresh token expired, auth broker holding none) onto the first keyed
-	 * `retry.fallbackChains` candidate, so a credential outage degrades to the
-	 * configured fallback instead of failing the prompt. Unpinned: once the
-	 * primary's credential returns, {@link maybeRestoreRetryFallbackPrimary}
-	 * switches back at the next prompt.
-	 * @returns true when the active model was switched.
+	 * Switches off a model whose provider has no usable credential onto the first
+	 * keyed fallback candidate. Unpinned, so the primary is restored once its
+	 * credential returns.
 	 */
 	async applyMissingCredentialFallback(signal: AbortSignal): Promise<boolean> {
-		if (!cfgRetryModelFallback.get(this.#host.settings)) return false;
+		if (!cfgRetryModelFallback.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return false;
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
@@ -2100,12 +2096,7 @@ export class TurnRecovery {
 		});
 	}
 
-	/**
-	 * First `retry.fallbackChains` candidate after `currentSelector` that has a
-	 * credential, fits the effort ceiling and the live context, and is not
-	 * depleted or in reserve. Undefined when none qualifies or when the active
-	 * model changed or `signal` aborted during the walk.
-	 */
+	/** First keyed, eligible fallback candidate; undefined when none or when the walk went stale. */
 	async #findKeyedRetryFallback(
 		currentSelector: string,
 		currentModel: Model,

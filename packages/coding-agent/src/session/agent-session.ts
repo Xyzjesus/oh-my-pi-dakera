@@ -8845,8 +8845,7 @@ export class AgentSession implements SettingsScope {
 				);
 			}
 
-			// Validate API key. A provider with no usable credential walks the
-			// configured retry fallback chain before the prompt fails.
+			// Validate API key; a provider without one walks the retry fallback chain first.
 			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
 			if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
 				if (setupAbort.signal.aborted) return false;

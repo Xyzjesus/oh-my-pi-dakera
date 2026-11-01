@@ -609,7 +609,7 @@ When the active chat model keeps failing (429s, quota walls, provider outages) a
 
 A prefixed wildcard such as `openrouter/google/*` can be used as a chain key or entry: it matches ids under that prefix or prepends the prefix to the failing model's bare id when changing providers. Bare fallback entries inherit the failing turn's thinking level (including `auto`); an explicit suffix, `:auto` included, replaces it. When a chain is exhausted, recovery can consult the current fallback model's own chain as well, and each hop still consumes a retry attempt. See [Retry policy](./non-compaction-retry-policy.md) for recovery ordering and quota behavior.
 
-A prompt whose active model has no usable credential (logged out, an expired OAuth refresh token, an auth broker holding none) walks the same chain before it is sent, instead of failing with `No API key found`. The first candidate that has a credential, fits the live context, and is not at its usage reserve takes the turn; with `fallbackRevertPolicy: cooldown-expiry` the session returns to the primary at the first prompt after its credential is back. With no such candidate, or `retry.modelFallback: false`, the prompt still fails with the original error.
+A prompt whose active model has no usable credential walks the same chain before it is sent instead of failing with `No API key found`.
 
 Retry model fallback is not context promotion. `contextPromotion.enabled: false` only disables [context promotion](./models.md#context-promotion) to a model's `contextPromotionTarget`; set `retry.modelFallback: false` to stop `retry.fallbackChains` from switching the active model after provider errors. Same-model retries and compaction remain available.
 

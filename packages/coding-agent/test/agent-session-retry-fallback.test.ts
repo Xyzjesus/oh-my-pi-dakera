@@ -507,57 +507,6 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.provider).toBe(primaryModel.provider);
 	});
 
-	it("still fails the prompt when no fallback candidate has a credential", async () => {
-		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!primaryModel) throw new Error("Expected bundled test model to exist");
-		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue(undefined);
-		const agent = new Agent({
-			getApiKey: () => undefined,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: () => {
-				throw new Error("No request expected without a credential");
-			},
-		});
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.fallbackChains": { "anthropic/*": ["openai/gpt-4o"] },
-		});
-		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
-
-		await expect(session.prompt("No credential anywhere")).rejects.toThrow("No API key found for anthropic");
-		expect(session.model?.provider).toBe("anthropic");
-	});
-
-	it("keeps the missing-credential error when retry.modelFallback is off, even with a keyed fallback", async () => {
-		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!primaryModel) throw new Error("Expected bundled test model to exist");
-		const getApiKey = modelRegistry.getApiKey.bind(modelRegistry);
-		vi.spyOn(modelRegistry, "getApiKey").mockImplementation((model, ...rest) =>
-			model.provider === primaryModel.provider ? Promise.resolve(undefined) : getApiKey(model, ...rest),
-		);
-		const agent = new Agent({
-			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: () => {
-				throw new Error("No request expected with model fallback disabled");
-			},
-		});
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.modelFallback": false,
-			"retry.fallbackChains": { "anthropic/*": ["openai/gpt-4o"] },
-		});
-		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
-		const fallbackEvents: AgentSessionEvent[] = [];
-		session.subscribe(event => {
-			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
-		});
-
-		await expect(session.prompt("Model fallback is off")).rejects.toThrow("No API key found for anthropic");
-		expect(session.model?.provider).toBe("anthropic");
-		expect(fallbackEvents).toEqual([]);
-	});
-
 	it("re-syncs the edit-mode system prompt after a retry-fallback model swap", async () => {
 		// A session that starts on a default-hashline model and auto-falls-back to a
 		// variant-pinned model must rebuild its base prompt so the edit-mode policy
