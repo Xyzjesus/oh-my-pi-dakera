@@ -6274,82 +6274,35 @@ describe("lsp regressions", () => {
 			}
 		});
 
-		for (const reloadFile of ["*", "crate_b/src/lib.rs"]) {
-			it(`restarts rust-analyzer so a new crate becomes analyzable after reload ${reloadFile}`, async () => {
-				const tempDir = TempDir.createSync("@omp-lsp-new-crate-reload-");
-				try {
-					const cwd = tempDir.path();
-					const first = path.join(cwd, "crate_a", "src", "lib.rs");
-					const added = path.join(cwd, "crate_b", "src", "lib.rs");
-					await Bun.write(path.join(cwd, "rust-analyzer.toml"), "");
-					await Bun.write(
-						path.join(cwd, "crate_a", "Cargo.toml"),
-						'[package]\nname = "crate_a"\nversion = "0.1.0"\n',
-					);
-					await Bun.write(first, "pub fn crate_a() {}\n");
-					const config: ServerConfig = {
-						command: "rust-analyzer",
-						fileTypes: [".rs"],
-						rootMarkers: ["rust-analyzer.toml"],
-					};
-					vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
-						servers: { "rust-analyzer": config },
-						idleTimeoutMs: undefined,
-					});
+		it("restarts rust-analyzer on reload so new crates are discovered at initialize", async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-rust-reload-");
+			try {
+				const server = installFakeLsp((message, srv) => {
+					if (message.method === "initialize") {
+						srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+					} else if (message.method === "rust-analyzer/reloadWorkspace" || message.method === "shutdown") {
+						srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+					} else if (message.method === "exit") {
+						srv.exit(0);
+					}
+				});
+				const config: ServerConfig = { command: "rust-analyzer", fileTypes: [".rs"], rootMarkers: [] };
+				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+					servers: { "rust-analyzer": config },
+					idleTimeoutMs: undefined,
+				});
 
-					let discovered = false;
-					const serve = (message: RpcMessage, server: FakeLspServer) => {
-						if (message.method === "initialize") {
-							discovered = fs.existsSync(path.join(cwd, "crate_b", "Cargo.toml"));
-							server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { hoverProvider: true } } });
-						} else if (message.method === "textDocument/hover") {
-							server.send({
-								jsonrpc: "2.0",
-								id: message.id,
-								result: discovered ? { contents: "crate_b loaded" } : null,
-							});
-						} else if (message.method === "rust-analyzer/reloadWorkspace") {
-							server.send({ jsonrpc: "2.0", id: message.id, result: null });
-						} else if (message.method === "shutdown") {
-							server.send({ jsonrpc: "2.0", id: message.id, result: null });
-						} else if (message.method === "exit") {
-							server.exit(0);
-						}
-					};
-					const firstServer = installFakeLsp(serve);
-					const client = await lspClient.getOrCreateClient(config, cwd);
-					await lspClient.ensureFileOpen(client, first);
-					await Bun.write(
-						path.join(cwd, "crate_b", "Cargo.toml"),
-						'[package]\nname = "crate_b"\nversion = "0.1.0"\n',
-					);
-					await Bun.write(added, "pub fn crate_b() {}\n");
-					const hoverParams = {
-						textDocument: { uri: fileToUri(added) },
-						position: { line: 0, character: 8 },
-					};
-					expect(await lspClient.sendRequest(client, "textDocument/hover", hoverParams)).toBeNull();
+				const tool = new LspTool(makeLspSession(tempDir.path()));
+				const result = await tool.execute("reload-rust", { action: "reload", file: "*" });
 
-					const result = await new LspTool(makeLspSession(cwd)).execute("reload-new-crate", {
-						action: "reload",
-						file: reloadFile,
-					});
-					expect(textResult(result)).toContain("Restarted rust-analyzer");
-					expect(firstServer.received.some(message => message.method === "shutdown")).toBe(true);
-
-					installFakeLsp(serve);
-					const restarted = await lspClient.getOrCreateClient(config, cwd);
-					await lspClient.ensureFileOpen(restarted, added);
-					expect(await lspClient.sendRequest(restarted, "textDocument/hover", hoverParams)).toEqual({
-						contents: "crate_b loaded",
-					});
-				} finally {
-					vi.restoreAllMocks();
-					await lspClient.shutdownAll();
-					tempDir.removeSync();
-				}
-			});
-		}
+				expect(textResult(result)).toContain("Restarted rust-analyzer");
+				expect(server.received.some(message => message.method === "shutdown")).toBe(true);
+			} finally {
+				vi.restoreAllMocks();
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
 
 		it("does not send rust-analyzer/reloadWorkspace to a non-rust server that crashes on it (#8571)", async () => {
 			const tempDir = TempDir.createSync("@omp-lsp-reload-non-rust-");

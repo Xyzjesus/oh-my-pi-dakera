@@ -260,7 +260,7 @@ export async function reloadServer(client: LspClient, serverName: string, signal
 	// rust-analyzer/reloadWorkspace refreshes only projects discovered at initialize.
 	// A new crate under a non-Cargo workspace root needs fresh filesystem discovery.
 	if (isRustAnalyzerClient(client) || serverName === "rust-analyzer") {
-		return restartServer(client, serverName, signal);
+		return restartServer(client, serverName);
 	}
 	// workspace/didChangeConfiguration is a notification per spec; sending it
 	// as a request hangs until the tool deadline on servers that route it to
@@ -272,18 +272,17 @@ export async function reloadServer(client: LspClient, serverName: string, signal
 		throwIfAborted(signal);
 		// The reload notification could not be delivered — the connection is
 		// wedged or the process already died. A restart must confirm teardown.
-		return restartServer(client, serverName, signal);
+		return restartServer(client, serverName);
 	}
 	await refreshOpenFiles(client, signal);
 	return `Reloaded ${serverName}`;
 }
 
-async function restartServer(client: LspClient, serverName: string, signal?: AbortSignal): Promise<string> {
-	throwIfAborted(signal);
-	// A session-only shutdown leaves a broker-shared process running. Kill the
-	// shared server before detaching so the next request initializes a new one.
+async function restartServer(client: LspClient, serverName: string): Promise<string> {
+	// A per-session teardown only detaches from a broker-shared server; ask the
+	// mux to kill it first (best-effort: the link may be the thing that is wedged).
 	if (client.proc.sharedMux) {
-		await sendNotification(client, MUX_RESTART_METHOD, undefined, signal);
+		await sendNotification(client, MUX_RESTART_METHOD, undefined, AbortSignal.timeout(2_000)).catch(() => {});
 	}
 	if (!(await shutdownClientInstance(client))) {
 		throw new Error(`Failed to restart ${serverName}: server process did not exit after kill`);
