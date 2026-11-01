@@ -77,10 +77,11 @@ export interface JobWidgetRegistry {
 	/**
 	 * Called when a job becomes a background job (registered, or promoted
 	 * from the foreground): a command that does not read at a glance gets its
-	 * caption (`AsyncJob.caption`) written once it has run a while, whether
-	 * or not anyone views it.
+	 * caption written once it has run a while, whether or not anyone views it.
 	 */
 	scheduleCaption(job: AsyncJob): void;
+	/** One line on what the job's command does and when it ends, once written; `undefined` with widgets turned off. */
+	caption(job: AsyncJob): string | undefined;
 	/** Called after a background refresh changed a shown widget or a caption landed, so a surface that is not polling repaints. */
 	subscribe(listener: () => void): () => void;
 	/** Drops a job's widget and pending caption, once its row is evicted. */

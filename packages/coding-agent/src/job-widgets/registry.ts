@@ -28,7 +28,7 @@ export interface JobWidgetsOptions {
 	minIngestMs?: number;
 	/** Job age before a spec may be requested or a caption is. */
 	authorAfterMs?: number;
-	/** Spec requests in flight at once, across jobs. */
+	/** Spec requests in flight at once, across jobs; caption requests get their own budget of the same size. */
 	maxInFlight?: number;
 	/** Spec requests (each with its one retry) per job. */
 	maxAttempts?: number;
@@ -82,6 +82,10 @@ export class JobWidgets implements JobWidgetRegistry {
 	readonly #entries = new Map<string, WidgetEntry>();
 	/** Pending and in-flight captions, by job id. */
 	readonly #captions = new Map<string, { timer: NodeJS.Timeout; request: AbortController }>();
+	/** Captions whose delay ran out while `maxInFlight` others were being written, oldest first. */
+	readonly #captionQueue: (() => void)[] = [];
+	readonly #captionTexts = new WeakMap<AsyncJob, string>();
+	#captionsInFlight = 0;
 	readonly #listeners = new Set<() => void>();
 	readonly #author: JobWidgetAuthor | undefined;
 	readonly #captioner: JobCaptionWriter | undefined;
@@ -151,6 +155,10 @@ export class JobWidgets implements JobWidgetRegistry {
 		this.#captions.set(job.id, { timer, request });
 	}
 
+	caption(job: AsyncJob): string | undefined {
+		return this.#enabled() ? this.#captionTexts.get(job) : undefined;
+	}
+
 	subscribe(listener: () => void): () => void {
 		this.#listeners.add(listener);
 		this.#syncTimer();
@@ -173,6 +181,7 @@ export class JobWidgets implements JobWidgetRegistry {
 		this.#disposed = true;
 		for (const entry of this.#entries.values()) entry.request?.abort();
 		for (const jobId of this.#captions.keys()) this.#cancelCaption(jobId);
+		this.#captionQueue.length = 0;
 		this.#entries.clear();
 		this.#listeners.clear();
 		this.#syncTimer();
@@ -248,19 +257,28 @@ export class JobWidgets implements JobWidgetRegistry {
 		void this.#writeSpec(entry, brief, previous);
 	}
 
-	/** Writes the caption of a job still running when its delay ran out, unless widgets are off. */
+	/**
+	 * Writes the caption of a job still running when its delay ran out, unless
+	 * widgets are off; waits its turn behind `maxInFlight` others.
+	 */
 	async #writeCaption(job: AsyncJob, command: string, request: AbortController): Promise<void> {
+		if (this.#captionsInFlight >= this.#options.maxInFlight) {
+			this.#captionQueue.push(() => void this.#writeCaption(job, command, request));
+			return;
+		}
+		this.#captionsInFlight += 1;
 		try {
-			if (job.status !== "running" || !this.#enabled()) return;
+			if (request.signal.aborted || job.status !== "running" || !this.#enabled()) return;
 			const caption = await this.#captioner?.(command, job.intent, request.signal);
-			// Widgets turned off while the model wrote it: drop it, like a spec.
-			if (!caption || request.signal.aborted || !this.#enabled()) return;
-			job.caption = caption;
+			if (!caption || request.signal.aborted) return;
+			this.#captionTexts.set(job, caption);
 			this.#notify();
 		} catch (error) {
 			if (!request.signal.aborted) logger.debug("Job caption failed", { jobId: job.id, error: String(error) });
 		} finally {
+			this.#captionsInFlight -= 1;
 			if (this.#captions.get(job.id)?.request === request) this.#captions.delete(job.id);
+			this.#captionQueue.shift()?.();
 		}
 	}
 

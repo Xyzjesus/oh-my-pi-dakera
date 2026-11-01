@@ -7,6 +7,7 @@
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { UserMessage } from "@oh-my-pi/pi-ai";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { shortenEmbeddedPaths } from "@oh-my-pi/pi-tui/render/render-utils";
 import { prompt, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import systemPrompt from "../prompts/system/job-caption-system.md" with { type: "text" };
@@ -45,7 +46,7 @@ export function needsJobCaption(command: string): boolean {
 	return /[\n;|&`]|\$\(/.test(unquoted);
 }
 
-/** The caption in a model reply: its first non-empty line as plain text, unquoted, without list markers or a final period. */
+/** The caption in a model reply: its first non-empty line as plain text with home paths shortened, unquoted, without list markers or a final period. */
 export function normalizeJobCaption(reply: string): string | undefined {
 	const line = reply
 		.split("\n")
@@ -58,7 +59,7 @@ export function normalizeJobCaption(reply: string): string | undefined {
 		.replace(/\s+/g, " ")
 		.replace(/\.$/, "")
 		.trim();
-	return caption ? truncate(caption, MAX_CAPTION_CHARS) : undefined;
+	return caption ? truncate(shortenEmbeddedPaths(caption), MAX_CAPTION_CHARS) : undefined;
 }
 
 /** A {@link JobCaptionWriter} backed by the `widget` model role. */

@@ -1,3 +1,4 @@
+import * as os from "node:os";
 import { afterEach, describe, expect, it } from "bun:test";
 import { AsyncJobManager, type AsyncJob } from "../../src/async/job-manager";
 import { type JobWidgetAuthorRequest, JobWidgets, normalizeJobCaption, TextTap } from "../../src/job-widgets";
@@ -295,15 +296,18 @@ describe("job widget registry", () => {
 		const manager = new AsyncJobManager({});
 		managers.push(manager);
 		const calls: [string, string | undefined][] = [];
-		manager.widgets = new JobWidgets({
+		let enabled = true;
+		const widgets = new JobWidgets({
 			authorAfterMs: 5,
+			enabled: () => enabled,
 			captioner: async (command, intent) => {
 				calls.push([command, intent]);
 				return "Checks worker every 60s until the indexer stops";
 			},
 		});
+		manager.widgets = widgets;
 		let notified = Promise.withResolvers<void>();
-		manager.widgets.subscribe(() => notified.resolve());
+		widgets.subscribe(() => notified.resolve());
 		const start = (command: string, intent?: string, foreground?: boolean) => {
 			const done = Promise.withResolvers<string>();
 			const id = manager.register("bash", command, () => done.promise, {
@@ -323,7 +327,10 @@ describe("job widget registry", () => {
 
 		await notified.promise;
 		expect(calls).toEqual([[watch.job.label, "Wait for the indexer"]]);
-		expect(watch.job.caption).toBe("Checks worker every 60s until the indexer stops");
+		expect(widgets.caption(watch.job)).toBe("Checks worker every 60s until the indexer stops");
+		enabled = false;
+		expect(widgets.caption(watch.job)).toBeUndefined();
+		enabled = true;
 
 		// Promoted past its delay, the foreground job is captioned right away.
 		notified = Promise.withResolvers<void>();
@@ -336,10 +343,10 @@ describe("job widget registry", () => {
 });
 
 describe("job caption replies", () => {
-	it("keeps the first line of a reply as plain text, without quotes, list markers or a final period", () => {
-		expect(normalizeJobCaption('\n- "Serves the docs \x1b[1msite\x1b[0m on port 4173 until cancelled."\nExtra')).toBe(
-			"Serves the docs site on port 4173 until cancelled",
-		);
+	it("keeps the first line of a reply as plain text with home paths shortened, without quotes, list markers or a final period", () => {
+		expect(
+			normalizeJobCaption(`\n- "Tails \x1b[1m${os.homedir()}/logs/app.log\x1b[0m until cancelled."\nExtra`),
+		).toBe("Tails ~/logs/app.log until cancelled");
 		expect(normalizeJobCaption("  \n ")).toBeUndefined();
 	});
 });

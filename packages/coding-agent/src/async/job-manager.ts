@@ -92,12 +92,6 @@ export interface AsyncJob {
 	 * the `label`. Only tools whose call starts a single job set it.
 	 */
 	intent?: string;
-	/**
-	 * One line on what a command job does and when it ends, written by the
-	 * job widgets' cheap model once the job has run a while (see
-	 * `JobWidgetRegistry.scheduleCaption`); absent for commands that read at a glance.
-	 */
-	caption?: string;
 	abortController: AbortController;
 	promise: Promise<void>;
 	resultText?: string;
