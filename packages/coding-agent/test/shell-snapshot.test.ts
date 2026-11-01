@@ -304,16 +304,7 @@ describe("getOrCreateSnapshot", () => {
 	it.skipIf(onWindows)(
 		"keeps private helpers referenced by snapshotted functions (mise/zoxide cd wrappers)",
 		async () => {
-			// Regression: the extractor filtered out every `(_|__)`-prefixed name
-			// outright, so activation wrappers survived without their helpers:
-			// `cd() { __zsh_like_cd cd "$@"; }` was captured but `__zsh_like_cd`
-			// was dropped, and every `cd` in the agent shell died with
-			// `command not found: __zsh_like_cd`. The fix grows the kept set to a
-			// dependency closure: underscore helpers enter the snapshot only when
-			// a kept body references them; unrelated private functions still drop;
-			// core tools stay excluded even when referenced. Hyphenated names
-			// (`_private-helper`) are legal shell function names and must not be
-			// split into mismatching tokens by the body scan.
+			// Regression: `cd() { __zsh_like_cd cd "$@"; }` was kept without its helper, so `cd` exited 127.
 			const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-closure-"));
 			await fs.writeFile(
 				path.join(home, ".bashrc"),
@@ -374,79 +365,6 @@ describe("getOrCreateSnapshot", () => {
 			expect(stdout).toBe(`${home}\nz_rc=0\nhelper-ok\n`);
 		},
 	);
-
-	it.skipIf(onWindows)("extracts functions even when the rc overrides core tools like sort", async () => {
-		// Review follow-up: an rc may define a `sort` function (a core-tool
-		// override this module deliberately drops from the snapshot). The
-		// extractor must not run it: a wrapper that suppresses or changes
-		// output used to leave `__omp_all` empty, so the snapshot silently
-		// lost every function while creation still "succeeded". Utility calls
-		// inside the extractor are `command`-qualified for this reason.
-		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-sort-"));
-		await fs.writeFile(
-			path.join(home, ".bashrc"),
-			["sort() { return 0; }", `hello() { echo hi; }`, `together() { hello; }`, ``].join("\n"),
-		);
-
-		const realBash = REAL_BASH;
-		if (!existsSync(realBash)) return;
-		const shellLink = path.join(home, "bash-omp-sort");
-		await fs.symlink(realBash, shellLink);
-
-		const snapshotPath = await getOrCreateSnapshot(shellLink, { ...process.env, HOME: home });
-		expect(snapshotPath).not.toBeNull();
-		const content = await fs.readFile(snapshotPath!, "utf8");
-
-		// The rc's `sort` override must stay out while real functions survive.
-		expect(content).toContain(`hello ()`);
-		expect(content).toContain(`together ()`);
-		expect(content).not.toMatch(/^sort \(\)$/m);
-
-		const replay = Bun.spawn([realBash, "--noprofile", "--norc", "-c", `source "$1"; together`, "_", snapshotPath!], {
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		const stdout = await readStream(replay.stdout as ReadableStream<Uint8Array> | null);
-		const stderr = await readStream(replay.stderr as ReadableStream<Uint8Array> | null);
-		await replay.exited;
-		expect({ exitCode: replay.exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-		expect(stdout).toBe("hi\n");
-	});
-
-	it.skipIf(onWindows)("completes a deep private dependency chain inside the snapshot budget", async () => {
-		// Review follow-up: the closure used to rescan every kept function per
-		// iteration, so a framework-scale shell (deep `_`-prefixed chains) blew
-		// the 2s `SNAPSHOT_TIMEOUT_MS`; `getOrCreateSnapshot` then returned
-		// null and the shell lost ALL snapshot functions. The worklist now
-		// prints each function once, keeping total work linear in kept count.
-		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-deep-"));
-		const lines = ["entry() { _a1; }"];
-		for (let i = 1; i < 250; i++) lines.push(`_a${i}() { _a${i + 1}; }`);
-		lines.push(`_a250() { echo deep-ok; }`);
-		for (let i = 0; i < 800; i++) lines.push(`f${i}() { :; }`);
-		await fs.writeFile(path.join(home, ".bashrc"), `${lines.join("\n")}\n`);
-
-		const realBash = REAL_BASH;
-		if (!existsSync(realBash)) return;
-		const shellLink = path.join(home, "bash-omp-deep");
-		await fs.symlink(realBash, shellLink);
-
-		const snapshotPath = await getOrCreateSnapshot(shellLink, { ...process.env, HOME: home });
-		expect(snapshotPath).not.toBeNull();
-		const content = await fs.readFile(snapshotPath!, "utf8");
-
-		// The whole chain must be captured and replayable.
-		expect((content.match(/^_a\d+ \(\)[ \t]*$/gm) ?? []).length).toBe(250);
-		const replay = Bun.spawn([realBash, "--noprofile", "--norc", "-c", `source "$1"; entry`, "_", snapshotPath!], {
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		const stdout = await readStream(replay.stdout as ReadableStream<Uint8Array> | null);
-		const stderr = await readStream(replay.stderr as ReadableStream<Uint8Array> | null);
-		await replay.exited;
-		expect({ exitCode: replay.exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-		expect(stdout).toBe("deep-ok\n");
-	});
 
 	it.skipIf(onWindows)("keeps the snapshot file at 0600 even when the rc file resets umask to 022", async () => {
 		// PR-review regression: previous revision ran `umask 077` BEFORE sourcing

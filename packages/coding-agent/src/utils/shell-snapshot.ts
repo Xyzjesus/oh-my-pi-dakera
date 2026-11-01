@@ -128,59 +128,25 @@ function generateSnapshotScript(shell: string, snapshotPath: string, rcFile: str
 
 	const quotedPath = quotePosixArgument(snapshotPath);
 
-	// Function extraction differs between bash and zsh. Each form prints
-	// function bodies on stdout so we can both persist them AND scan their
-	// bodies for referenced env vars (issue #3470).
-	//
-	// Names are seeded with the user's own (non-underscore-prefixed)
-	// functions, then grown by an incremental worklist: each round prints
-	// and scans ONLY the newly discovered names, so total work stays linear
-	// in kept functions regardless of dependency-chain depth (a per-level
-	// rescan of everything kept so far would re-print the whole set on every
-	// iteration and can blow the 2s snapshot budget on framework-scale
-	// shells). Every already-defined function name referenced by a kept body
-	// (typically the underscore-prefixed helpers of `mise activate` /
-	// `zoxide init`, e.g. `cd()` calling `__zsh_like_cd`) is pulled in.
-	// Without the closure the snapshot keeps `cd() { __zsh_like_cd cd "$@" }`
-	// but drops `__zsh_like_cd` itself, so every `cd` in the agent shell
-	// dies with `command not found: __zsh_like_cd`. Referencing is lexical
-	// (the body text is scanned, not interpreted), so words in strings or
-	// comments can only over-include functions the user actually defined —
-	// never invent missing ones. The token regex spans the full shell
-	// function-name alphabet (letters, digits, `_`, `.`, `-`) so hyphenated
-	// helpers like `_private-helper` are not split into mismatching halves;
-	// candidates are still intersected with the exact function-name list, so
-	// wider tokens cannot match anything the user did not define. Utility
-	// calls are `command`-qualified so rc-defined `sort`/`grep` overrides
-	// cannot corrupt the extraction. Core tools stay excluded even when
-	// referenced, so `greet() { ls -la; }` keeps `greet` without redefining
-	// `ls`. `_`-prefixed names never seed the closure: completion helpers
-	// and other framework internals are only kept when a kept body calls
-	// them.
+	// Function extraction differs between bash and zsh. Each form prints function bodies on stdout so
+	// we can both persist them AND scan their bodies for referenced env vars (issue #3470).
+	// Seeds are the user's own (non-`_`) functions; the worklist then pulls in every defined function a
+	// kept body names, so `cd() { __zsh_like_cd cd "$@"; }` (mise/zoxide) keeps its helper. Core tools
+	// stay excluded even when referenced, and utilities are `command`-qualified against rc overrides.
 	const listFunctionNames = isZsh ? "typeset +f" : "declare -F | cut -d' ' -f3";
 	const printFunction = isZsh ? "typeset -f" : "declare -f";
 	const functionExtractor = `# Force autoload all functions first
-${isZsh ? "typeset -f" : "declare -f"} > /dev/null 2>&1
-# Get user function names - filter system/private ones
-${listFunctionNames} 2>/dev/null | grep -vE '^(_|__)' | grep -vE '${commonFunctionRegex}' > /dev/null
+${printFunction} > /dev/null 2>&1
 __omp_all=$(${listFunctionNames} 2>/dev/null | command sort -u)
 __omp_next=$(printf '%s\\n' "$__omp_all" | grep -vE '^(_|__)' | grep -vE '${commonFunctionRegex}')
 __omp_kept=$(mktemp)
 while [ -n "$__omp_next" ]; do
    printf '%s\\n' "$__omp_next" >> "$__omp_kept"
-   __omp_bodies=$(printf '%s\\n' "$__omp_next" | while IFS= read -r __omp_f; do
-      [ -n "$__omp_f" ] || continue
-      ${printFunction} "$__omp_f" 2>/dev/null
-   done)
-   __omp_cand=$(printf '%s\\n' "$__omp_bodies" | grep -oE '[A-Za-z_][A-Za-z0-9_.-]*' | command sort -u \\
-      | grep -xF -f <(printf '%s\\n' "$__omp_all") \\
-      | grep -vE '${commonFunctionRegex}')
-   __omp_next=$({ printf '%s\\n' "$__omp_cand"; cat "$__omp_kept"; } | command sort | uniq -u)
+   __omp_next=$(printf '%s\\n' "$__omp_next" | while IFS= read -r __omp_f; do ${printFunction} "$__omp_f" 2>/dev/null; done \\
+      | grep -oE '[A-Za-z_][A-Za-z0-9_.-]*' | command sort -u | grep -xF -f <(printf '%s\\n' "$__omp_all") \\
+      | grep -vE '${commonFunctionRegex}' | grep -vxF -f "$__omp_kept")
 done
-command sort -u "$__omp_kept" | while IFS= read -r __omp_f; do
-   [ -n "$__omp_f" ] || continue
-   ${printFunction} "$__omp_f" 2>/dev/null
-done
+while IFS= read -r __omp_f; do ${printFunction} "$__omp_f" 2>/dev/null; done < "$__omp_kept"
 rm -f "$__omp_kept"`;
 
 	// Shell options extraction
