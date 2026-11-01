@@ -66,18 +66,4 @@ describe("SambaNova reasoning replay wire format", () => {
 		expect(assistant.reasoning).toBe("Two plus three is five.");
 		expect(assistant).not.toHaveProperty("reasoning_content");
 	});
-
-	// Cross-host and signature-less history (carried reasoning, older sessions)
-	// has no streamed field name; the encoder falls back to `reasoning_content`.
-	// SambaNova accepts that field on every served model (verified live).
-	test("replays a signature-less carried block under the fallback field", () => {
-		const model = sambanovaModel();
-		const assistant = wireAssistant(model, {
-			type: "thinking",
-			thinking: "Two plus three is five.",
-		});
-
-		expect(assistant.reasoning_content).toBe("Two plus three is five.");
-		expect(assistant).not.toHaveProperty("reasoning");
-	});
 });

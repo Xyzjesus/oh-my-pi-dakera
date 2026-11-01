@@ -28,13 +28,7 @@ provider "sambanova" {
 	// (https://docs.sambanova.ai/docs/api-reference/chat-completions/create-chat-based-completion).
 	thinking-mode "effort"
 	thinking-format "openai"
-	// The gateway streams each assistant turn's thinking back in a `reasoning`
-	// field and its shared prefix cache keys on the full rendered turn, so
-	// replaying that same field keeps turn-N prompts aligned with the cached
-	// continuation instead of diverging at the first thinking token (the
-	// cloud-serving analog of the llama.cpp re-rendering in #3528). Signature-less
-	// blocks carried from another host fall back to `reasoning_content`; the
-	// gateway accepts that field on every served model (verified live).
+	// Replay the streamed `reasoning` field so turn-N prompts hit the gateway's prefix cache.
 	replay-reasoning-content #true
 	class "gpt-oss" {
 		thinking-efforts "low" "medium" "high"
