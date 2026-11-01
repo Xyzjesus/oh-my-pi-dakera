@@ -173,6 +173,16 @@ const DIRECT_METHODS_DESCRIPTION = [...TAB_VALUE_METHODS, ...TAB_PRESENCE_METHOD
 const ELEMENT_METHODS_DESCRIPTION = ELEMENT_METHODS.join(", ");
 const FRAME_METHODS_DESCRIPTION = FRAME_METHODS.join(", ");
 
+function renderWaitStep(step: TabCallStep): string {
+	if (!step.method.startsWith("waitFor")) return renderCallChain([step]);
+	const options = step.args.at(-1);
+	if (!isRecord(options) || options.timeout !== Number.POSITIVE_INFINITY) return renderCallChain([step]);
+	// JSON.stringify turns Infinity into null; zero is the equivalent bounded disable sentinel.
+	const args = step.args.slice();
+	args[args.length - 1] = { ...options, timeout: 0 };
+	return renderCallChain([{ method: step.method, args }]);
+}
+
 function renderElementStep(step: TabCallStep): string {
 	if (step.method !== "evaluate" || typeof step.args[0] !== "string") return renderCallChain([step]);
 	const [source, ...args] = step.args;
@@ -196,7 +206,7 @@ export function renderTabCall(chain: readonly TabCallStep[]): string {
 				`Only tab.id(n)/tab.ref(id)/tab.frame(selector) results accept a chained call; got tab.${root.method}().`,
 			);
 		}
-		return `return await tab.${renderCallChain([root])};`;
+		return `return await tab.${renderWaitStep(root)};`;
 	}
 	if (TAB_PRESENCE_METHODS.includes(root.method)) {
 		if (chain.length === 2) {
@@ -204,7 +214,7 @@ export function renderTabCall(chain: readonly TabCallStep[]): string {
 				`Only tab.id(n)/tab.ref(id)/tab.frame(selector) results accept a chained call; got tab.${root.method}().`,
 			);
 		}
-		return `return (await tab.${renderCallChain([root])}) !== null;`;
+		return `return (await tab.${renderWaitStep(root)}) !== null;`;
 	}
 	if (TAB_HANDLE_METHODS.includes(root.method)) {
 		const frameHandle = root.method === "frame";
@@ -223,7 +233,7 @@ export function renderTabCall(chain: readonly TabCallStep[]): string {
 				`Unknown ${frameHandle ? "frame" : "element"} method "${handleStep.method}". ${frameHandle ? "Frame" : "Element"} handles support: ${description}.`,
 			);
 		}
-		return `return await (await tab.${renderCallChain([root])}).${renderElementStep(handleStep)};`;
+		return `return await (await tab.${renderCallChain([root])}).${frameHandle ? renderWaitStep(handleStep) : renderElementStep(handleStep)};`;
 	}
 
 	throw new ToolError(

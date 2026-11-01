@@ -125,18 +125,44 @@ describe("browser prelude", () => {
 				Settings.isolated({ "browser.enabled": true, "tools.maxTimeout": 20 }),
 			),
 		).toBe(19_000);
-		// Puppeteer's disable sentinels use the largest bounded wait, not the 30s default.
-		const zeroChain = [{ method: "waitForSelector", args: ["#closed", { timeout: 0 }] }];
-		expect(await effectiveWait({ chain: zeroChain }, 0)).toBe(299_000);
-		const infiniteChain = [{ method: "waitForSelector", args: ["#closed", { timeout: Infinity }] }];
-		expect(await effectiveWait({ chain: infiniteChain }, Infinity)).toBe(299_000);
-		expect(
-			await effectiveWait(
-				{ chain: zeroChain },
-				0,
-				Settings.isolated({ "browser.enabled": true, "tools.maxTimeout": 20 }),
-			),
-		).toBe(19_000);
+	});
+
+	it("preserves an infinite wait's bounded timeout through the rendered browser call", async () => {
+		let actualWaitMs: number | undefined;
+		spyOn(supervisor, "runInTab").mockImplementation(async (_name, opts) => {
+			const waitForSelector = (_selector: string, options: { timeout: number }): object => {
+				actualWaitMs = resolveWaitTimeout(opts.timeoutMs, options.timeout);
+				return {};
+			};
+			const tab = {
+				waitForSelector,
+				frame: (_selector: string) => ({ waitForSelector }),
+			};
+			const returnValue = await runInContext(`(async () => { ${opts.code} })()`, createContext({ tab }));
+			return { displays: [], returnValue, screenshots: [] };
+		});
+		const session = makeSession();
+		const call = async (chain: unknown[], toolSession = session): Promise<void> => {
+			await createBrowserPrelude(toolSession).invoke(
+				{ action: "call", name: "docs", chain },
+				{ session: toolSession, toolCallId: "browser-infinite-wait" },
+			);
+		};
+
+		await call([{ method: "waitForSelector", args: ["#closed", { timeout: Infinity }] }]);
+		expect(actualWaitMs).toBe(299_000);
+		await call([
+			{ method: "frame", args: ["#pay"] },
+			{ method: "waitForSelector", args: ["#closed", { timeout: Infinity }] },
+		]);
+		expect(actualWaitMs).toBe(299_000);
+		await call([{ method: "waitForSelector", args: ["#closed", { timeout: 0 }] }]);
+		expect(actualWaitMs).toBe(299_000);
+		await call(
+			[{ method: "waitForSelector", args: ["#closed", { timeout: Infinity }] }],
+			makeSession(Settings.isolated({ "browser.enabled": true, "tools.maxTimeout": 20 })),
+		);
+		expect(actualWaitMs).toBe(19_000);
 	});
 
 	it("owns actions and exposes tab handles instead of browser.run", async () => {
