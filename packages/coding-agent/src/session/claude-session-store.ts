@@ -73,12 +73,9 @@ async function readTitleSidecar(transcript: string, sessionId: string): Promise<
 	try {
 		const value: unknown = await Bun.file(path.join(path.dirname(transcript), sessionId, "custom-title.json")).json();
 		if (!isRecord(value)) return undefined;
-		// Strip ANSI/control characters and collapse whitespace so the picker row shows
-		// the same single-line name that setSessionName() will keep on import.
 		const title = stringField(value, "customTitle");
 		return title ? cleanPreview(sanitizeText(title)) : undefined;
 	} catch {
-		// Sidecars are optional; a missing or unreadable title must not hide the session.
 		return undefined;
 	}
 }
@@ -485,10 +482,7 @@ export class ClaudeSessionStore implements ForeignSessionStore {
 			if (parentId) sourceTails.set(sourceUuid, parentId);
 		}
 
-		// The sidecar only ever holds a user rename and Claude rewrites it on every rename,
-		// so it is the current name even when the transcript's last custom-title record is
-		// older; it ranks above that record and above a generated ai-title, and importing
-		// it as "user" keeps omp's auto-title refresh from overwriting it.
+		// The sidecar (info.title) is rewritten on every /rename, so it outranks older transcript titles.
 		const userTitle = info.title ?? sourceTitle;
 		const title = userTitle ?? aiTitle;
 		if (title) await manager.setSessionName(title, userTitle ? "user" : "auto");
