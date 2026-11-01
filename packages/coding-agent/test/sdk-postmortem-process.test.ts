@@ -30,4 +30,15 @@ describe("SDK import process ownership", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.stdout).toContain("host stopped cleanly");
 	});
+
+	it("still runs registered cleanup when the embedding host exits", async () => {
+		const result = await runHost(`
+			const { postmortem } = await import("@oh-my-pi/pi-utils");
+			postmortem.register("host-probe", () => process.stdout.write("cleanup ran\\n"));
+			process.exit(0);
+		`);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain("cleanup ran");
+	});
 });

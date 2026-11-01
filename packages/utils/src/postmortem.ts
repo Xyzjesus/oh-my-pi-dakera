@@ -717,20 +717,21 @@ export async function fatal(error: unknown): Promise<never> {
 	return exitAfterFatal(report, "Fatal error", err, Reason.UNHANDLED_REJECTION);
 }
 
+// Exit-time cleanup is safe in any host: it neither delays nor triggers an exit. Signal and fatal
+// handlers change the process lifecycle, so only {@link installProcessHandlers} adds them.
+process.on("exit", () => {
+	void runCleanup(Reason.EXIT); // fire and forget (exit imminent)
+});
+
 let processHandlersInstalled = false;
 
-/** Installs OMP's process-wide shutdown and fatal handlers for a CLI-owned process. */
+/** Installs OMP's process-wide signal and fatal handlers for a CLI-owned process. */
 export function installProcessHandlers(): void {
 	if (processHandlersInstalled) return;
 	processHandlersInstalled = true;
 	removeEmbeddedRejectionListener();
-	if (!Bun.isMainThread) {
-		// Workers only run synchronous cleanup on exit; their own error listeners report failures to the parent.
-		process.on("exit", () => {
-			void runCleanup(Reason.EXIT);
-		});
-		return;
-	}
+	// Workers report failures through their own error listeners to the parent.
+	if (!Bun.isMainThread) return;
 
 	process
 		.on("SIGINT", async () => {
@@ -798,9 +799,6 @@ export function installProcessHandlers(): void {
 				err,
 				Reason.UNHANDLED_REJECTION,
 			);
-		})
-		.on("exit", async () => {
-			void runCleanup(Reason.EXIT); // fire and forget (exit imminent)
 		})
 		.on("SIGTERM", async () => {
 			// A stopped session otherwise leaves its last frame above the shell prompt,
