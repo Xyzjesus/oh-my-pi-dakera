@@ -6251,7 +6251,7 @@ describe("lsp regressions", () => {
 			}
 		});
 
-		it("restarts rust-analyzer on reload so new crates are discovered at initialize", async () => {
+		it("reloads rust-analyzer in place, restarting it once a new crate appears (#17658)", async () => {
 			const tempDir = TempDir.createSync("@omp-lsp-rust-reload-");
 			try {
 				const server = installFakeLsp((message, srv) => {
@@ -6270,9 +6270,14 @@ describe("lsp regressions", () => {
 				});
 
 				const tool = new LspTool(makeLspSession(tempDir.path()));
-				const result = await tool.execute("reload-rust", { action: "reload", file: "*" });
+				const reloaded = await tool.execute("reload-rust", { action: "reload", file: "*" });
+				expect(textResult(reloaded)).toContain("Reloaded rust-analyzer");
+				expect(server.received.some(message => message.method === "rust-analyzer/reloadWorkspace")).toBe(true);
 
-				expect(textResult(result)).toContain("Restarted rust-analyzer");
+				// rust-analyzer discovers crates only at initialize.
+				await Bun.write(path.join(tempDir.path(), "crate_b", "Cargo.toml"), '[package]\nname = "crate_b"\n');
+				const restarted = await tool.execute("reload-rust-new-crate", { action: "reload", file: "*" });
+				expect(textResult(restarted)).toContain("Restarted rust-analyzer");
 				expect(server.received.some(message => message.method === "shutdown")).toBe(true);
 			} finally {
 				vi.restoreAllMocks();

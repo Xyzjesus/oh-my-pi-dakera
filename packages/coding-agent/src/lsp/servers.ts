@@ -5,10 +5,12 @@ import {
 	getActiveOrPendingClient,
 	getOrCreateClient,
 	isRustAnalyzerClient,
+	listCargoManifests,
 	type LspServerStatus,
 	notifySaved,
 	refreshOpenFiles,
 	sendNotification,
+	sendRequest,
 	shutdownClientInstance,
 	syncContent,
 	WARMUP_TIMEOUT_MS,
@@ -257,10 +259,19 @@ export function reloadConfigurationParams(config: ServerConfig): { settings: Rec
 
 export async function reloadServer(client: LspClient, serverName: string, signal?: AbortSignal): Promise<string> {
 	throwIfAborted(signal);
-	// rust-analyzer/reloadWorkspace refreshes only projects discovered at initialize.
-	// A new crate under a non-Cargo workspace root needs fresh filesystem discovery.
+	// Gate on the binary: some servers (Roslyn) crash on an unknown method (#8571).
 	if (isRustAnalyzerClient(client) || serverName === "rust-analyzer") {
-		return restartServer(client, serverName);
+		// reloadWorkspace refreshes only the projects found at initialize; a new crate needs a restart.
+		const [initial, current] = await Promise.all([client.cargoManifests, listCargoManifests(client.cwd, signal)]);
+		if (initial === undefined || initial !== current) return restartServer(client, serverName);
+		try {
+			await sendRequest(client, "rust-analyzer/reloadWorkspace", undefined, signal);
+			return `Reloaded ${serverName}`;
+		} catch (err) {
+			// A cancel must propagate, never read as an unsupported method (#6369).
+			throwIfAborted(signal);
+			if (!isMethodNotFoundError(err)) throw err;
+		}
 	}
 	// workspace/didChangeConfiguration is a notification per spec; sending it
 	// as a request hangs until the tool deadline on servers that route it to
