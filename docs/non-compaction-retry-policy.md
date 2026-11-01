@@ -134,7 +134,7 @@ Delay override inputs can come from parsed retry headers (`retry-after-ms`, `ret
 
 If the delay exceeds `retry.maxDelayMs` and no switch succeeds, retry normally fails immediately. `retry.waitForUsageReset: true` permits a longer usage-limit wait only when timing is authoritative (parsed provider reset timing or a complete usage-report future reset), not a guessed exhaustion backoff. Long waits remain abortable and are chunked to avoid timer overflow; they also hold unattended/subagent runs.
 
-Usage-limit retry deadlines use wall-clock time and are captured before retry-start event delivery, so system sleep and notification delivery count toward the announced wait. Each timer slice is at most one second: on platforms whose relative timers exclude suspend, a resumed process rechecks the deadline within one second of active runtime. Ordinary error backoff retains its monotonic duration semantics. Wall-clock corrections also affect quota deadlines.
+Usage-limit waits run to a wall-clock deadline, so time the machine spends asleep counts toward the reset; ordinary backoff stays monotonic.
 
 ## Abort mechanics
 

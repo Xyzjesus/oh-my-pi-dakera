@@ -31,16 +31,14 @@ export async function sleepLong(delayMs: number, signal?: AbortSignal): Promise<
 
 /**
  * Wait for a wall-clock deadline, including time spent suspended. Some platforms
- * exclude suspend from relative timers, so recheck at least every second of
- * active runtime. A resumed process never waits out a multi-hour uptime remainder.
+ * exclude suspend from relative timers, so recheck at least once per second.
  */
 export async function sleepUntil(deadlineMs: number, signal?: AbortSignal): Promise<void> {
-	signal?.throwIfAborted();
 	while (true) {
+		signal?.throwIfAborted();
 		const remaining = deadlineMs - Date.now();
 		if (!(remaining > 0)) return;
 		await scheduler.wait(Math.min(remaining, 1_000), { signal });
-		signal?.throwIfAborted();
 	}
 }
 

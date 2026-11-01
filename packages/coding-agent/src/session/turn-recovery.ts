@@ -3109,8 +3109,7 @@ export class TurnRecovery {
 		}
 
 		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
-		// Quota resets elapse while the machine sleeps, just like the UI's
-		// wall-clock countdown. Capture the deadline before event delivery.
+		// Quota resets elapse while the machine sleeps; capture the deadline before event delivery.
 		const usageResetDeadline = AIError.is(id, AIError.Flag.UsageLimit) ? Date.now() + delayMs : undefined;
 
 		await this.#host.emitSessionEvent({
@@ -3138,8 +3137,7 @@ export class TurnRecovery {
 		this.#maybeInjectThinkingLoopRedirect(id);
 		this.#maybeInjectMalformedFunctionCallRedirect(id, maxRetries, preserveFailedTurn, switchedModel);
 
-		// Preserve monotonic backoff for ordinary failures. Quota deadlines
-		// instead include system sleep and are rechecked with bounded timers.
+		// Quota waits follow the wall clock; ordinary backoff stays monotonic.
 		const retryAbortController = new AbortController();
 		this.#retryAbortController?.abort();
 		this.#retryAbortController = retryAbortController;
