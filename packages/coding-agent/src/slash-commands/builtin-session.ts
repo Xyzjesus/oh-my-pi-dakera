@@ -366,8 +366,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				rows.push(
 					`${guide}[${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration((job.endTime ?? now) - job.startTime)}${agent}`,
 				);
-				// What the job is for leads; full mode follows it with the whole command.
-				const lines = full ? [job.intent, job.command ?? job.label] : [job.intent ?? job.label];
+				// What the job is for leads; full mode follows it with what the command does and the whole command.
+				const lines = full ? [job.intent, job.caption, job.command ?? job.label] : [job.intent ?? job.label];
 				const indent = jobTreeIndent(row, theme);
 				for (const entry of lines) {
 					if (!entry) continue;

@@ -1,12 +1,14 @@
 /**
  * The widgets of one root session's jobs: derives each shown job's view from
  * its live output, asks the cheap model for a spec once the job has output
- * worth describing, and pushes refreshed views to subscribers while jobs run.
+ * worth describing (and for a caption of a command that needs explaining),
+ * and pushes refreshed views to subscribers while jobs run.
  */
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJob } from "../async/job-manager";
 import type { JobWidgetAuthor, JobWidgetAuthorRequest } from "./author";
+import { type JobCaptionWriter, needsJobCaption } from "./caption";
 import { JobWidgetRuntime, sampleLines } from "./runtime";
 import { type JobWidgetSpec, jobWidgetSkip, validateJobWidgetSpec } from "./spec";
 import type { JobWidgetBrief, JobWidgetRegistry } from "./types";
@@ -15,16 +17,18 @@ import type { JobWidgetBrief, JobWidgetRegistry } from "./types";
 export interface JobWidgetsOptions {
 	/** Writes specs; absent = fallback views only. */
 	author?: JobWidgetAuthor;
-	/** Whether widgets are on (`async.widgets`); read on every call. */
+	/** Writes command captions (`AsyncJob.caption`); absent = no captions. */
+	captioner?: JobCaptionWriter;
+	/** Whether widgets and captions are on (`async.widgets`); read on every call. */
 	enabled?: () => boolean;
 	now?: () => number;
 	/** Background refresh period while subscribers watch running widgets. */
 	refreshMs?: number;
 	/** Minimum time between two reads of one job's sources. */
 	minIngestMs?: number;
-	/** Job age before a spec may be requested. */
+	/** Job age before a spec or a caption may be requested. */
 	authorAfterMs?: number;
-	/** Spec requests in flight at once, across jobs. */
+	/** Spec and caption requests in flight at once, across jobs. */
 	maxInFlight?: number;
 	/** Spec requests (each with its one retry) per job. */
 	maxAttempts?: number;
@@ -71,6 +75,9 @@ interface WidgetEntry {
 	skippedWatch?: string;
 	/** A spec dropped for no longer fitting the output, sent back as rejected with the next request. */
 	misfit?: { answer: string; errors: string[] };
+	/** Whether the job's caption was decided: requested once, or found unneeded. */
+	captionAsked: boolean;
+	captionRequest?: AbortController;
 }
 
 /** {@link JobWidgetRegistry} for one root `AsyncJobManager`. */
@@ -78,15 +85,17 @@ export class JobWidgets implements JobWidgetRegistry {
 	readonly #entries = new Map<string, WidgetEntry>();
 	readonly #listeners = new Set<() => void>();
 	readonly #author: JobWidgetAuthor | undefined;
+	readonly #captioner: JobCaptionWriter | undefined;
 	readonly #enabled: () => boolean;
 	readonly #now: () => number;
-	readonly #options: Required<Omit<JobWidgetsOptions, "author" | "enabled" | "now">>;
+	readonly #options: Required<Omit<JobWidgetsOptions, "author" | "captioner" | "enabled" | "now">>;
 	#inFlight = 0;
 	#timer: NodeJS.Timeout | undefined;
 	#disposed = false;
 
 	constructor(options: JobWidgetsOptions = {}) {
 		this.#author = options.author;
+		this.#captioner = options.captioner;
 		this.#enabled = options.enabled ?? (() => true);
 		this.#now = options.now ?? Date.now;
 		this.#options = {
@@ -103,13 +112,16 @@ export class JobWidgets implements JobWidgetRegistry {
 	view(job: AsyncJob): JobWidgetView | undefined {
 		if (this.#disposed || !job.widgetInputs) return undefined;
 		if (!this.#enabled()) {
-			this.#entries.get(job.id)?.request?.abort();
+			const entry = this.#entries.get(job.id);
+			entry?.request?.abort();
+			entry?.captionRequest?.abort();
 			this.#syncTimer();
 			return undefined;
 		}
 		let entry = this.#entries.get(job.id);
 		if (!entry || entry.job !== job) {
 			entry?.request?.abort();
+			entry?.captionRequest?.abort();
 			const runtime = new JobWidgetRuntime(undefined, job.startTime, this.#now);
 			entry = {
 				job,
@@ -122,6 +134,7 @@ export class JobWidgets implements JobWidgetRegistry {
 				attempts: 0,
 				authorUnavailable: false,
 				specHadWatch: false,
+				captionAsked: false,
 			};
 			this.#entries.set(job.id, entry);
 		}
@@ -144,13 +157,17 @@ export class JobWidgets implements JobWidgetRegistry {
 		const entry = this.#entries.get(jobId);
 		if (!entry) return;
 		entry.request?.abort();
+		entry.captionRequest?.abort();
 		this.#entries.delete(jobId);
 		this.#syncTimer();
 	}
 
 	dispose(): void {
 		this.#disposed = true;
-		for (const entry of this.#entries.values()) entry.request?.abort();
+		for (const entry of this.#entries.values()) {
+			entry.request?.abort();
+			entry.captionRequest?.abort();
+		}
 		this.#entries.clear();
 		this.#listeners.clear();
 		this.#syncTimer();
@@ -182,6 +199,7 @@ export class JobWidgets implements JobWidgetRegistry {
 			entry.request?.abort();
 		} else {
 			this.#maybeAuthor(entry, brief, now);
+			this.#maybeCaption(entry, brief, now);
 		}
 		return this.#recompute(entry, brief);
 	}
@@ -224,6 +242,43 @@ export class JobWidgets implements JobWidgetRegistry {
 			return;
 		}
 		void this.#writeSpec(entry, brief, previous);
+	}
+
+	/** Ask once for a caption of a command that needs explaining, once the job is old enough to be worth one. */
+	#maybeCaption(entry: WidgetEntry, brief: JobWidgetBrief, now: number): void {
+		if (entry.captionAsked || !this.#captioner || !entry.shown) return;
+		if (brief.kind !== "bash" || !brief.command) return;
+		if (now - entry.job.startTime < this.#options.authorAfterMs || this.#inFlight >= this.#options.maxInFlight) {
+			return;
+		}
+		entry.captionAsked = true;
+		if (needsJobCaption(brief.command)) void this.#writeCaption(entry, brief);
+	}
+
+	async #writeCaption(entry: WidgetEntry, brief: JobWidgetBrief): Promise<void> {
+		const captioner = this.#captioner;
+		if (!captioner) return;
+		const controller = new AbortController();
+		entry.captionRequest = controller;
+		this.#inFlight += 1;
+		let caption: string | undefined;
+		try {
+			caption = await captioner(brief, controller.signal);
+		} catch (error) {
+			if (!controller.signal.aborted) logger.debug("Job caption failed", { jobId: entry.job.id, error: String(error) });
+		} finally {
+			this.#inFlight -= 1;
+			if (entry.captionRequest === controller) entry.captionRequest = undefined;
+		}
+		if (this.#entries.get(entry.job.id) !== entry) return;
+		// Cancelled while widgets were turned off: ask again once they are back on.
+		if (controller.signal.aborted) {
+			entry.captionAsked = false;
+			return;
+		}
+		if (!caption) return;
+		entry.job.caption = caption;
+		this.#notify();
 	}
 
 	#reauthorReason(entry: WidgetEntry, brief: JobWidgetBrief, now: number): string | undefined {
@@ -367,7 +422,10 @@ export class JobWidgets implements JobWidgetRegistry {
 
 	#tick(): void {
 		if (!this.#enabled()) {
-			for (const entry of this.#entries.values()) entry.request?.abort();
+			for (const entry of this.#entries.values()) {
+				entry.request?.abort();
+				entry.captionRequest?.abort();
+			}
 			this.#syncTimer();
 			return;
 		}

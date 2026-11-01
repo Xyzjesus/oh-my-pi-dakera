@@ -28,6 +28,8 @@ export interface JobsPanelJob {
 	readonly label: string;
 	/** What the job is for, in the model's words; rows and the detail lead with it over a command `label`. */
 	readonly intent?: string;
+	/** One line on what a command does and when it ends, from the cheap model; the detail shows it under the intent. */
+	readonly caption?: string;
 	readonly startTime: number;
 	readonly endTime?: number;
 	/** Registry id of the agent that owns the job. */
@@ -211,6 +213,11 @@ export class JobsSheet implements Component {
 		}
 		const detail = selected && this.#inspect(selected.id);
 		if (detail) {
+			if (selected.caption) {
+				for (const line of wrapTextWithAnsi(sanitizeText(selected.caption), Math.max(1, width - 3))) {
+					lines.push(`   ${theme.fg("muted", line)}`);
+				}
+			}
 			// Rows show the cut label; the selected job's command wraps here,
 			// bounded so a long script never pushes the facts and output off the sheet.
 			if (detail.command) {
@@ -400,7 +407,7 @@ function describeJobItem(job: JobsPanelJob, agentName: string | undefined, guide
 		value: [span(age, "mono")],
 		icon: TYPE_ICON[job.type] ?? "job",
 		tone: STATUS_TONE[job.status],
-		title: `${job.intent ? `${job.intent}\n` : ""}${job.label}\n${status} · ${job.type} · ${job.id}`,
+		title: `${job.intent ? `${job.intent}\n` : ""}${job.caption ? `${job.caption}\n` : ""}${job.label}\n${status} · ${job.type} · ${job.id}`,
 		aria: `${job.intent ?? job.label}, ${status.toLowerCase()}, ${age}`,
 	});
 }
@@ -434,7 +441,8 @@ function describeEmpty(): NativeNode {
 
 /**
  * The selected job: a status line (pill, live elapsed, type · id, Cancel job
- * when `cancellable`), what it is for, its full command, facts, its widget
+ * when `cancellable`), what it is for, what its command does (the cheap
+ * model's caption), its full command, facts, its widget
  * when it has data to draw and the output pane (or its empty state).
  */
 function describeDetail(
@@ -478,6 +486,7 @@ function describeDetail(
 			{ role: "omp.jobs.status", gap: "sm", align: "center" },
 		),
 		title ? text(title, { role: "omp.jobs.title", wrap: "word" }) : undefined,
+		job.caption ? text([span(job.caption, "muted")], { role: "omp.jobs.caption", wrap: "word" }) : undefined,
 		command
 			? code(command, { lang: "bash", wrap: true, preview: { lines: 4 }, role: "omp.jobs.command" })
 			: undefined,

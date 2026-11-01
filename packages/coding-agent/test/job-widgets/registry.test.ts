@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { AsyncJobManager, type AsyncJob } from "../../src/async/job-manager";
-import { type JobWidgetAuthorRequest, JobWidgets, TextTap } from "../../src/job-widgets";
+import { type JobWidgetAuthorRequest, type JobWidgetBrief, JobWidgets, normalizeJobCaption, TextTap } from "../../src/job-widgets";
 
 const REQ_SPEC = {
 	title: "load test",
@@ -289,5 +289,57 @@ describe("job widget registry", () => {
 		tap.append("\nlate\n");
 		expect(widgets.view(job)).toBe(frozen);
 		unsubscribe();
+	});
+
+	it("captions a long command once after it has run a while, and leaves a glanceable one alone", async () => {
+		const manager = new AsyncJobManager({});
+		managers.push(manager);
+		let offset = 0;
+		const briefs: JobWidgetBrief[] = [];
+		const answers: PromiseWithResolvers<string | undefined>[] = [];
+		const widgets = new JobWidgets({
+			now: () => Date.now() + offset,
+			minIngestMs: 0,
+			captioner: brief => {
+				briefs.push(brief);
+				const answer = Promise.withResolvers<string | undefined>();
+				answers.push(answer);
+				return answer.promise;
+			},
+		});
+		const watch = startJob(
+			manager,
+			"while ssh worker 'systemctl is-active indexer'; do sleep 60; done; ssh worker 'journalctl -u indexer -n 25'",
+		).job;
+		const short = startJob(manager, "bun test").job;
+		widgets.view(watch);
+		widgets.view(short);
+		expect(briefs).toHaveLength(0);
+
+		offset = 15_000;
+		widgets.view(watch);
+		widgets.view(short);
+		expect(briefs.map(brief => brief.command)).toEqual([watch.label]);
+		const pushed = Promise.withResolvers<void>();
+		const unsubscribe = widgets.subscribe(() => pushed.resolve());
+		answers[0]?.resolve("Checks worker every 60s until indexer stops, then prints its last 25 log lines");
+		await pushed.promise;
+		expect(watch.caption).toBe("Checks worker every 60s until indexer stops, then prints its last 25 log lines");
+		expect(short.caption).toBeUndefined();
+
+		offset = 60_000;
+		widgets.view(watch);
+		widgets.view(short);
+		expect(briefs).toHaveLength(1);
+		unsubscribe();
+	});
+});
+
+describe("job caption replies", () => {
+	it("keeps the first line of a reply, without quotes, list markers or a final period", () => {
+		expect(normalizeJobCaption('\n- "Serves the docs site on port 4173 until cancelled."\nExtra')).toBe(
+			"Serves the docs site on port 4173 until cancelled",
+		);
+		expect(normalizeJobCaption("  \n ")).toBeUndefined();
 	});
 });
