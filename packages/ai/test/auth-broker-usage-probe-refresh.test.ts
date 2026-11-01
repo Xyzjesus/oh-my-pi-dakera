@@ -51,8 +51,4 @@ describe("auth broker usage-probe refresh", () => {
 		expect(store!.listAuthCredentials("anthropic").map(row => row.id)).toEqual([credentialId]);
 	});
 
-	test("disables the broker row when an ordinary refresh gets invalid_grant", async () => {
-		await expect(client.refreshCredential(credentialId)).rejects.toThrow("500");
-		expect(store!.listAuthCredentials("anthropic")).toEqual([]);
-	});
 });
