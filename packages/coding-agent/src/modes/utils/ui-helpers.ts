@@ -314,8 +314,6 @@ export class UiHelpers {
 			case "custom": {
 				if (message.display) {
 					if (message.customType === "async-result") {
-						// A registered renderer owns this card; the built-in block is the
-						// fallback when none exists, when one declines, and when one throws.
 						const renderer = this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType);
 						const component = buildAsyncResultComponent(message, renderer);
 						component.setExpanded(this.ctx.toolOutputExpanded);
