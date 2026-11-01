@@ -1,8 +1,8 @@
 /**
  * The widgets of one root session's jobs: derives each shown job's view from
  * its live output, asks the cheap model for a spec once the job has output
- * worth describing, and pushes refreshed views to subscribers while jobs run.
- * The same model captions long commands once they have run a while.
+ * worth describing (and for a caption of a command that needs explaining),
+ * and pushes refreshed views to subscribers while jobs run.
  */
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -17,7 +17,7 @@ import type { JobWidgetBrief, JobWidgetRegistry } from "./types";
 export interface JobWidgetsOptions {
 	/** Writes specs; absent = fallback views only. */
 	author?: JobWidgetAuthor;
-	/** Writes command captions (`AsyncJob.caption`); absent = no captions. */
+	/** Writes command captions; absent = no captions. */
 	captioner?: JobCaptionWriter;
 	/** Whether widgets and captions are on (`async.widgets`); read on every call. */
 	enabled?: () => boolean;
@@ -26,9 +26,9 @@ export interface JobWidgetsOptions {
 	refreshMs?: number;
 	/** Minimum time between two reads of one job's sources. */
 	minIngestMs?: number;
-	/** Job age before a spec may be requested or a caption is. */
+	/** Job age before a spec or a caption may be requested. */
 	authorAfterMs?: number;
-	/** Spec requests in flight at once, across jobs; caption requests get their own budget of the same size. */
+	/** Spec and caption requests in flight at once, across jobs. */
 	maxInFlight?: number;
 	/** Spec requests (each with its one retry) per job. */
 	maxAttempts?: number;
@@ -75,17 +75,16 @@ interface WidgetEntry {
 	skippedWatch?: string;
 	/** A spec dropped for no longer fitting the output, sent back as rejected with the next request. */
 	misfit?: { answer: string; errors: string[] };
+	/** Set once the caption was decided: requested, or found unneeded. */
+	captionAsked?: boolean;
+	caption?: string;
 }
 
 /** {@link JobWidgetRegistry} for one root `AsyncJobManager`. */
 export class JobWidgets implements JobWidgetRegistry {
 	readonly #entries = new Map<string, WidgetEntry>();
-	/** Pending and in-flight captions, by job id. */
-	readonly #captions = new Map<string, { timer: NodeJS.Timeout; request: AbortController }>();
-	/** Captions whose delay ran out while `maxInFlight` others were being written, oldest first. */
-	readonly #captionQueue: (() => void)[] = [];
-	readonly #captionTexts = new WeakMap<AsyncJob, string>();
-	#captionsInFlight = 0;
+	/** Cancels in-flight caption requests on dispose. */
+	readonly #disposal = new AbortController();
 	readonly #listeners = new Set<() => void>();
 	readonly #author: JobWidgetAuthor | undefined;
 	readonly #captioner: JobCaptionWriter | undefined;
@@ -143,24 +142,9 @@ export class JobWidgets implements JobWidgetRegistry {
 		return entry.view;
 	}
 
-	scheduleCaption(job: AsyncJob): void {
-		const command = job.process?.command;
-		if (this.#disposed || !this.#captioner || !command || !needsJobCaption(command)) return;
-		this.#cancelCaption(job.id);
-		const request = new AbortController();
-		// A foreground job promoted to the background may already be past the delay.
-		const delay = Math.max(0, job.startTime + this.#options.authorAfterMs - this.#now());
-		const timer = setTimeout(() => {
-			// Eligibility is decided here: a job that settles while queued behind others still gets its caption.
-			if (job.status === "running" && this.#enabled()) void this.#writeCaption(job, command, request);
-			else this.#cancelCaption(job.id);
-		}, delay);
-		timer.unref();
-		this.#captions.set(job.id, { timer, request });
-	}
-
 	caption(job: AsyncJob): string | undefined {
-		return this.#enabled() ? this.#captionTexts.get(job) : undefined;
+		const entry = this.#entries.get(job.id);
+		return entry?.job === job && this.#enabled() ? entry.caption : undefined;
 	}
 
 	subscribe(listener: () => void): () => void {
@@ -173,7 +157,6 @@ export class JobWidgets implements JobWidgetRegistry {
 	}
 
 	forget(jobId: string): void {
-		this.#cancelCaption(jobId);
 		const entry = this.#entries.get(jobId);
 		if (!entry) return;
 		entry.request?.abort();
@@ -184,8 +167,7 @@ export class JobWidgets implements JobWidgetRegistry {
 	dispose(): void {
 		this.#disposed = true;
 		for (const entry of this.#entries.values()) entry.request?.abort();
-		for (const jobId of this.#captions.keys()) this.#cancelCaption(jobId);
-		this.#captionQueue.length = 0;
+		this.#disposal.abort();
 		this.#entries.clear();
 		this.#listeners.clear();
 		this.#syncTimer();
@@ -217,6 +199,7 @@ export class JobWidgets implements JobWidgetRegistry {
 			entry.request?.abort();
 		} else {
 			this.#maybeAuthor(entry, brief, now);
+			this.#maybeCaption(entry, brief, now);
 		}
 		return this.#recompute(entry, brief);
 	}
@@ -261,34 +244,25 @@ export class JobWidgets implements JobWidgetRegistry {
 		void this.#writeSpec(entry, brief, previous);
 	}
 
-	/** Writes a job's caption once fewer than `maxInFlight` others are being written. */
-	async #writeCaption(job: AsyncJob, command: string, request: AbortController): Promise<void> {
-		if (this.#captionsInFlight >= this.#options.maxInFlight) {
-			this.#captionQueue.push(() => void this.#writeCaption(job, command, request));
+	/** Ask once for the caption of a shown command that needs explaining, once the job is old enough. */
+	#maybeCaption(entry: WidgetEntry, brief: JobWidgetBrief, now: number): void {
+		if (entry.captionAsked || !this.#captioner || brief.kind !== "bash" || !brief.command) return;
+		if (now - entry.job.startTime < this.#options.authorAfterMs || this.#inFlight >= this.#options.maxInFlight)
 			return;
-		}
-		this.#captionsInFlight += 1;
-		try {
-			if (request.signal.aborted) return;
-			const caption = await this.#captioner?.(command, job.intent, request.signal);
-			if (!caption || request.signal.aborted) return;
-			this.#captionTexts.set(job, caption);
-			this.#notify();
-		} catch (error) {
-			if (!request.signal.aborted) logger.debug("Job caption failed", { jobId: job.id, error: String(error) });
-		} finally {
-			this.#captionsInFlight -= 1;
-			if (this.#captions.get(job.id)?.request === request) this.#captions.delete(job.id);
-			this.#captionQueue.shift()?.();
-		}
+		entry.captionAsked = true;
+		if (needsJobCaption(brief.command)) void this.#writeCaption(entry, brief.command);
 	}
 
-	#cancelCaption(jobId: string): void {
-		const caption = this.#captions.get(jobId);
-		if (!caption) return;
-		clearTimeout(caption.timer);
-		caption.request.abort();
-		this.#captions.delete(jobId);
+	async #writeCaption(entry: WidgetEntry, command: string): Promise<void> {
+		this.#inFlight += 1;
+		try {
+			entry.caption = await this.#captioner?.(command, entry.job.intent, this.#disposal.signal);
+			if (entry.caption) this.#notify();
+		} catch (error) {
+			if (!this.#disposed) logger.debug("Job caption failed", { jobId: entry.job.id, error: String(error) });
+		} finally {
+			this.#inFlight -= 1;
+		}
 	}
 
 	#reauthorReason(entry: WidgetEntry, brief: JobWidgetBrief, now: number): string | undefined {

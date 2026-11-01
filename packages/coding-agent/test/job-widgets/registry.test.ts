@@ -44,7 +44,7 @@ afterEach(async () => {
 	for (const manager of managers.splice(0)) await manager.dispose({ timeoutMs: 500 });
 });
 
-function startJob(manager: AsyncJobManager, label: string) {
+function startJob(manager: AsyncJobManager, label: string, intent?: string) {
 	const tap = new TextTap("out", "stdout+stderr");
 	const done = Promise.withResolvers<string>();
 	const run = ({ signal }: { signal: AbortSignal }) => {
@@ -52,6 +52,7 @@ function startJob(manager: AsyncJobManager, label: string) {
 		return done.promise;
 	};
 	const id = manager.register("bash", label, run, {
+		intent,
 		widgetInputs: { sources: () => [tap], brief: () => ({ kind: "bash", command: label }) },
 	});
 	const job = manager.getJob(id) as AsyncJob;
@@ -292,53 +293,50 @@ describe("job widget registry", () => {
 		unsubscribe();
 	});
 
-	it("captions a background command that needs explaining once it has run a while, unviewed; never a glanceable, finished or foreground one", async () => {
+	it("captions a shown command that needs explaining once, after it has run a while; never a glanceable one", async () => {
 		const manager = new AsyncJobManager({});
 		managers.push(manager);
-		const calls: [string, string | undefined][] = [];
+		let offset = 0;
 		let enabled = true;
+		const calls: [string, string | undefined][] = [];
 		const widgets = new JobWidgets({
-			authorAfterMs: 5,
+			now: () => Date.now() + offset,
+			minIngestMs: 0,
 			enabled: () => enabled,
 			captioner: async (command, intent) => {
 				calls.push([command, intent]);
 				return "Checks worker every 60s until the indexer stops";
 			},
 		});
-		manager.widgets = widgets;
-		let notified = Promise.withResolvers<void>();
-		widgets.subscribe(() => notified.resolve());
-		const start = (command: string, intent?: string, foreground?: boolean) => {
-			const done = Promise.withResolvers<string>();
-			const id = manager.register("bash", command, () => done.promise, {
-				intent,
-				foreground,
-				process: { command, cwd: "/work", pids: () => [] },
-			});
-			return { job: manager.getJob(id) as AsyncJob, finish: () => done.resolve("ok") };
+		const watch = startJob(
+			manager,
+			"while ssh worker 'systemctl is-active indexer'; do sleep 60; done",
+			"Wait for the indexer",
+		).job;
+		// A redirection and quoted metacharacters are not control flow.
+		const glanceable = ["bun test 2>&1", "curl -sO 'https://x.test/a?one=1&two=2|3'"].map(
+			command => startJob(manager, command).job,
+		);
+		const viewAll = () => {
+			for (const job of [watch, ...glanceable]) widgets.view(job);
 		};
-		// Registered first so its delay runs out first: finished by then, it is never captioned.
-		start("for i in $(seq 40); do sleep 3; done").finish();
-		// Glanceable: a redirection and quoted metacharacters are not control flow.
-		start("bun test 2>&1");
-		start("curl -sO 'https://x.test/a?one=1&two=2|3'");
-		const held = start("while ! test -f ready; do sleep 1; done; cat ready", undefined, true);
-		const watch = start("while ssh worker 'systemctl is-active indexer'; do sleep 60; done", "Wait for the indexer");
+		viewAll();
+		expect(calls).toHaveLength(0);
 
-		await notified.promise;
-		expect(calls).toEqual([[watch.job.label, "Wait for the indexer"]]);
-		expect(widgets.caption(watch.job)).toBe("Checks worker every 60s until the indexer stops");
+		offset = 15_000;
+		const pushed = Promise.withResolvers<void>();
+		const unsubscribe = widgets.subscribe(() => pushed.resolve());
+		viewAll();
+		await pushed.promise;
+		expect(calls).toEqual([[watch.label, "Wait for the indexer"]]);
+		expect(widgets.caption(watch)).toBe("Checks worker every 60s until the indexer stops");
 		enabled = false;
-		expect(widgets.caption(watch.job)).toBeUndefined();
-		enabled = true;
+		expect(widgets.caption(watch)).toBeUndefined();
 
-		// Promoted past its delay, the foreground job is captioned right away.
-		notified = Promise.withResolvers<void>();
-		manager.backgroundJob(held.job.id);
-		await notified.promise;
-		expect(calls.map(([command]) => command)).toEqual([watch.job.label, held.job.label]);
-		watch.finish();
-		held.finish();
+		enabled = true;
+		viewAll();
+		expect(calls).toHaveLength(1);
+		unsubscribe();
 	});
 });
 
