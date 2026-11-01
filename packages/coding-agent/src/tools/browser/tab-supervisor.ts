@@ -1462,9 +1462,10 @@ export async function releaseTabsForOwner(ownerId: string, opts: ReleaseTabOptio
  * Tabs this settle machinery may ever touch: OMP-launched headless puppeteer
  * tabs (`kindTag === "headless"` covers hidden and visible shared-daemon
  * tabs) that are alive and not opted out with `persist`. Connected, relay,
- * and spawned tabs may drive long-lived user browsers or apps; cmux surfaces
- * have no CDP lifecycle. None are frozen or reaped here. Ownership follows
- * the `releaseTabsForOwner` contract: recorded on creation, never on reuse.
+ * and spawned tabs drive the user's own pages/apps, and cmux surfaces are a
+ * different backend with no CDP lifecycle — all are never frozen or reaped
+ * here. Ownership follows the `releaseTabsForOwner` contract: recorded on
+ * creation, never transferred by reuse.
  */
 function isSettleManaged(tab: TabSession): boolean {
 	return tab.backend === "worker" && tab.kindTag === "headless" && tab.state === "alive" && !tab.persist;

@@ -280,8 +280,8 @@ export function resolveSpawnArgs(exe: string, appArgs: string[] | undefined, cwd
 		.replace(/[^a-z0-9]+/g, "-");
 	const hash = Bun.hash.wyhash(exe).toString(16).padStart(16, "0");
 	const launchArgs = [...args];
-	// Avoid opening Chrome's welcome tour and default-browser prompt beside
-	// the managed tab in a newly created profile.
+	// A fresh profile otherwise opens the welcome tour and default-browser
+	// prompt as extra page targets, which attach may adopt instead of ours.
 	for (const flag of ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain"]) {
 		if (!args.includes(flag)) launchArgs.push(flag);
 	}
