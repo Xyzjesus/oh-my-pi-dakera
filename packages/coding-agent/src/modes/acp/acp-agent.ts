@@ -1812,7 +1812,10 @@ export class AcpAgent implements Agent {
 				},
 			};
 		} else {
-			if (record.lifetimeUpdatesReady && (event.type === "thinking_level_changed" || event.type === "model_changed")) {
+			if (
+				record.lifetimeUpdatesReady &&
+				(event.type === "thinking_level_changed" || event.type === "model_changed")
+			) {
 				this.#trackLifetimeDelivery(record, event.type, this.#pushConfigOptionUpdate(record));
 			}
 			return;

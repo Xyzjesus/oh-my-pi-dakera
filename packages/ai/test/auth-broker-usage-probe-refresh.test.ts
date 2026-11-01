@@ -50,5 +50,4 @@ describe("auth broker usage-probe refresh", () => {
 		await expect(client.refreshCredential(credentialId, undefined, "usage-probe")).rejects.toThrow("500");
 		expect(store!.listAuthCredentials("anthropic").map(row => row.id)).toEqual([credentialId]);
 	});
-
 });

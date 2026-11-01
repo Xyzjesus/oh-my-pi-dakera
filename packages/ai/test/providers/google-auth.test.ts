@@ -304,5 +304,4 @@ describe("Workforce Identity Federation ADC", () => {
 		expect(await getVertexAccessToken({ fetch: fetchImpl })).toBe("second-access");
 		expect(sentRefreshTokens).toEqual(["file-refresh", "rotated-refresh"]);
 	});
-
 });

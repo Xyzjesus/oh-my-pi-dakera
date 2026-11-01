@@ -432,5 +432,4 @@ describe("pre-approval refusal gate", () => {
 
 		expect(select).not.toHaveBeenCalled();
 	});
-
 });

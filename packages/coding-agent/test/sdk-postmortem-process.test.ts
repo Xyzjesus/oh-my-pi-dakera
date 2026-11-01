@@ -30,5 +30,4 @@ describe("SDK import process ownership", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.stdout).toContain("host stopped cleanly");
 	});
-
 });
