@@ -299,7 +299,6 @@ import { resolveYieldReportText } from "./tools/yield";
 import {
 	createModelJobCaptionWriter,
 	createModelJobWidgetAuthor,
-	type JobCaptionWriter,
 	type JobWidgetAuthor,
 	JobWidgets,
 	type ModelJobWidgetAuthorOptions,
@@ -883,12 +882,6 @@ export interface CreateAgentSessionOptions {
 	 * which share their root's widgets.
 	 */
 	jobWidgetAuthor?: JobWidgetAuthor;
-	/**
-	 * Writes the captions of the root session's long command jobs. Defaults
-	 * to the `widget` model role; tests inject a fake. Ignored for child
-	 * sessions, like {@link jobWidgetAuthor}.
-	 */
-	jobCaptionWriter?: JobCaptionWriter;
 	/**
 	 * Registry id of the spawning agent, recorded as this subagent's parent in
 	 * the agent registry. Distinct from `parentTaskPrefix`, which is this agent's
@@ -2386,9 +2379,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			author:
 				options.jobWidgetAuthor ??
 				createModelJobWidgetAuthor({ ...cheapModelOptions, onUsage: usagePurpose("job-widget") }),
-			captioner:
-				options.jobCaptionWriter ??
-				createModelJobCaptionWriter({ ...cheapModelOptions, onUsage: usagePurpose("job-caption") }),
+			captioner: createModelJobCaptionWriter({ ...cheapModelOptions, onUsage: usagePurpose("job-caption") }),
 		});
 	}
 	const scopedAsyncJobManager = asyncJobManager ?? options.asyncJobManager;

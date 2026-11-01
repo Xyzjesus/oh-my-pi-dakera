@@ -1,12 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { AsyncJobManager, type AsyncJob } from "../../src/async/job-manager";
-import {
-	type JobWidgetAuthorRequest,
-	type JobWidgetBrief,
-	JobWidgets,
-	normalizeJobCaption,
-	TextTap,
-} from "../../src/job-widgets";
+import { type JobWidgetAuthorRequest, JobWidgets, normalizeJobCaption, TextTap } from "../../src/job-widgets";
 
 const REQ_SPEC = {
 	title: "load test",
@@ -297,85 +291,43 @@ describe("job widget registry", () => {
 		unsubscribe();
 	});
 
-	it("captions a long command once after it has run a while, and leaves a glanceable one alone", async () => {
+	it("captions a command that needs explaining once it has run a while, unviewed; never a glanceable or finished one", async () => {
 		const manager = new AsyncJobManager({});
 		managers.push(manager);
-		let offset = 0;
-		const briefs: JobWidgetBrief[] = [];
-		const answers: PromiseWithResolvers<string | undefined>[] = [];
-		const widgets = new JobWidgets({
-			now: () => Date.now() + offset,
-			minIngestMs: 0,
-			captioner: brief => {
-				briefs.push(brief);
-				const answer = Promise.withResolvers<string | undefined>();
-				answers.push(answer);
-				return answer.promise;
+		const calls: [string, string | undefined][] = [];
+		manager.widgets = new JobWidgets({
+			authorAfterMs: 5,
+			captioner: async (command, intent) => {
+				calls.push([command, intent]);
+				return "Checks worker every 60s until the indexer stops";
 			},
 		});
-		const watch = startJob(
-			manager,
-			"while ssh worker 'systemctl is-active indexer'; do sleep 60; done; ssh worker 'journalctl -u indexer -n 25'",
-		).job;
-		const short = startJob(manager, "bun test").job;
-		widgets.view(watch);
-		widgets.view(short);
-		expect(briefs).toHaveLength(0);
+		const captioned = Promise.withResolvers<void>();
+		manager.widgets.subscribe(() => captioned.resolve());
+		const start = (command: string, intent?: string) => {
+			const done = Promise.withResolvers<string>();
+			const id = manager.register("bash", command, () => done.promise, {
+				intent,
+				process: { command, cwd: "/work", pids: () => [] },
+			});
+			return { job: manager.getJob(id) as AsyncJob, finish: () => done.resolve("ok") };
+		};
+		// Registered first so its delay runs out first: finished by then, it is never captioned.
+		start("for i in $(seq 40); do sleep 3; done").finish();
+		const short = start("bun test 2>&1").job;
+		const watch = start("while ssh worker 'systemctl is-active indexer'; do sleep 60; done", "Wait for the indexer");
 
-		offset = 15_000;
-		widgets.view(watch);
-		widgets.view(short);
-		expect(briefs.map(brief => brief.command)).toEqual([watch.label]);
-		const pushed = Promise.withResolvers<void>();
-		const unsubscribe = widgets.subscribe(() => pushed.resolve());
-		answers[0]?.resolve("Checks worker every 60s until indexer stops, then prints its last 25 log lines");
-		await pushed.promise;
-		expect(watch.caption).toBe("Checks worker every 60s until indexer stops, then prints its last 25 log lines");
+		await captioned.promise;
+		expect(calls).toEqual([[watch.job.label, "Wait for the indexer"]]);
+		expect(watch.job.caption).toBe("Checks worker every 60s until the indexer stops");
 		expect(short.caption).toBeUndefined();
-
-		offset = 60_000;
-		widgets.view(watch);
-		widgets.view(short);
-		expect(briefs).toHaveLength(1);
-		unsubscribe();
-	});
-
-	it("captions a listed command whose widget was never shown, without authoring a widget", async () => {
-		const manager = new AsyncJobManager({});
-		managers.push(manager);
-		let offset = 0;
-		const { calls, author } = scriptedAuthor();
-		const commands: (string | undefined)[] = [];
-		const widgets = new JobWidgets({
-			author,
-			now: () => Date.now() + offset,
-			minIngestMs: 0,
-			captioner: async brief => {
-				commands.push(brief.command);
-				return "Waits about 2 min, printing a tick every 3s";
-			},
-		});
-		const { job, tap } = startJob(manager, "i=0; while [ $i -lt 40 ]; do echo tick $i; sleep 3; i=$((i+1)); done");
-		tap.append("tick 0\ntick 1\ntick 2\ntick 3\n");
-		widgets.requestCaption(job);
-		expect(commands).toHaveLength(0);
-
-		offset = 15_000;
-		widgets.requestCaption(job);
-		await settle();
-		expect(commands).toEqual([job.label]);
-		expect(job.caption).toBe("Waits about 2 min, printing a tick every 3s");
-		expect(calls).toHaveLength(0);
-
-		widgets.requestCaption(job);
-		widgets.view(job);
-		expect(commands).toHaveLength(1);
+		watch.finish();
 	});
 });
 
 describe("job caption replies", () => {
-	it("keeps the first line of a reply, without quotes, list markers or a final period", () => {
-		expect(normalizeJobCaption('\n- "Serves the docs site on port 4173 until cancelled."\nExtra')).toBe(
+	it("keeps the first line of a reply as plain text, without quotes, list markers or a final period", () => {
+		expect(normalizeJobCaption('\n- "Serves the docs \x1b[1msite\x1b[0m on port 4173 until cancelled."\nExtra')).toBe(
 			"Serves the docs site on port 4173 until cancelled",
 		);
 		expect(normalizeJobCaption("  \n ")).toBeUndefined();

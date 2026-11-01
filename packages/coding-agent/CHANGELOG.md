@@ -4,11 +4,11 @@
 
 ### Added
 
-- Long or multi-step background shell commands get a one-line caption saying what they do and when they end, written once per job by the `widget` model role when the job, after running 15 seconds, is shown in the jobs sheet, a live widget or a `/jobs full` listing; those surfaces show it under the job's purpose. It follows the Live Job Widgets setting (`async.widgets`), and `CreateAgentSessionOptions.jobCaptionWriter` replaces the model call ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
+- Long or multi-step background shell commands get a one-line caption saying what they do and when they end, written once per job by the `widget` model role after the job has run 15 seconds; the jobs sheet, `/jobs full` and the jobs HUD hover show it under the job's purpose. It follows the Live Job Widgets setting (`async.widgets`) ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Changed
 
-- Background bash jobs now carry the purpose the model gave for the command: `/jobs`, `/jobs full`, `proc://` listings, `wait` and `job` results, and the jobs HUD hover lead with it ahead of the raw command line ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
+- Background bash and eval jobs now carry the purpose the model gave for the call: `/jobs`, `/jobs full`, `proc://` listings, `wait` and `job` results, and the jobs HUD hover lead with it ahead of the raw command line ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.14.2] - 2026-10-31
 

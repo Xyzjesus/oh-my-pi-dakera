@@ -224,24 +224,28 @@ describe("JobsSheet", () => {
 		expect(text).not.toContain("\x1b[2J");
 	});
 
-	it("flattens a job's intent to one clean row in the terminal fallback", () => {
+	it("renders a job's intent as one clean row and its caption without the home directory in the terminal fallback", async () => {
+		await initTheme();
 		const job: JobsPanelJob = {
 			id: "bash-i",
 			type: "bash",
 			status: "running",
 			label: "sleep 60",
 			intent: `Watch\x1b]0;pwned\x07\tthe\nlog in ${os.homedir()}/logs`,
+			caption: `Tails ${os.homedir()}/logs/app.log until cancelled`,
 			startTime: NOW,
 		};
 		const sheet = new JobsSheet({
 			load: () => ({ running: [job], recent: [] }),
-			inspect: () => undefined,
+			inspect: () => ({ pids: [] }),
 			close: vi.fn(),
 		});
-		const row = sheet.render(160).find(line => line.includes("Watch"));
+		const lines = sheet.render(160);
+		const row = lines.find(line => line.includes("Watch"));
 		expect(row).toContain("Watch the log in ~/logs");
 		expect(row).not.toContain("\x1b]0;");
 		expect(row).not.toContain("\t");
+		expect(lines.map(line => Bun.stripANSI(line))).toContain("   Tails ~/logs/app.log until cancelled");
 	});
 
 	it("renders read-only when the source cannot cancel: the jobs and detail stay, Cancel job is gone", () => {

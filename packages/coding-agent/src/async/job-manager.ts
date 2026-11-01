@@ -88,14 +88,14 @@ export interface AsyncJob {
 	label: string;
 	/**
 	 * What the job is for, in the model's words: the `i` intent on the call
-	 * that started it. Job views lead with it, since a process job's `label`
-	 * is its raw command line.
+	 * that started it, as one line of plain text. Job views lead with it over
+	 * the `label`. Only tools whose call starts a single job set it.
 	 */
 	intent?: string;
 	/**
 	 * One line on what a command job does and when it ends, written by the
 	 * job widgets' cheap model once the job has run a while (see
-	 * `JobWidgets`); absent for commands that read at a glance.
+	 * `JobWidgetRegistry.scheduleCaption`); absent for commands that read at a glance.
 	 */
 	caption?: string;
 	abortController: AbortController;
@@ -505,6 +505,7 @@ export class AsyncJobManager {
 		})();
 
 		this.#jobs.set(id, job);
+		this.widgets?.scheduleCaption(job);
 		return id;
 	}
 

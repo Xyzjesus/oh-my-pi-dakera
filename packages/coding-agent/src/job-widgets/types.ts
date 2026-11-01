@@ -75,15 +75,14 @@ export interface JobWidgetRegistry {
 	 */
 	view(job: AsyncJob): JobWidgetView | undefined;
 	/**
-	 * Asks for the caption of a running command's job (`AsyncJob.caption`)
-	 * without showing its widget, for a listing that prints the command; the
-	 * caption shows on a later listing. Asks at most once per job, and not
-	 * for a job younger than the caption delay or with widgets turned off.
+	 * Called once per registered job: a command that does not read at a
+	 * glance gets its caption (`AsyncJob.caption`) written once it has run a
+	 * while, whether or not anyone views it.
 	 */
-	requestCaption(job: AsyncJob): void;
-	/** Called after a background refresh changed a shown widget, so a surface that is not polling repaints. */
+	scheduleCaption(job: AsyncJob): void;
+	/** Called after a background refresh changed a shown widget or a caption landed, so a surface that is not polling repaints. */
 	subscribe(listener: () => void): () => void;
-	/** Drops a job's widget, once its row is evicted. */
+	/** Drops a job's widget and pending caption, once its row is evicted. */
 	forget(jobId: string): void;
 	dispose(): void;
 }

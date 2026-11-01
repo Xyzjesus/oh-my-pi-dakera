@@ -3333,16 +3333,14 @@ export class AgentSession implements SettingsScope {
 	 * the `recentLimit` (default 10) newest settled ones across the tree, with the subagents
 	 * that own them and the ancestors linking those to this agent. Lineage comes
 	 * from the agent registry, falling back to the task job that runs a subagent
-	 * once its registry entry is gone. `captions` asks for the captions of the
-	 * running commands listed, for a listing that prints them (`/jobs full`).
+	 * once its registry entry is gone.
 	 */
-	getAsyncJobTree(options?: { recentLimit?: number; captions?: boolean }): AsyncJobTree | null {
+	getAsyncJobTree(options?: { recentLimit?: number }): AsyncJobTree | null {
 		const manager = this.#asyncJobManager;
 		if (!manager) return null;
 		const rootId = this.#agentId;
 		const parents = this.#jobTreeParents();
 		const running = manager.getRunningJobs().filter(job => this.#inJobTree(job, parents));
-		if (options?.captions) for (const job of running) manager.widgets?.requestCaption(job);
 		const recent = manager
 			.getRecentJobs(Number.POSITIVE_INFINITY)
 			.filter(job => this.#inJobTree(job, parents))

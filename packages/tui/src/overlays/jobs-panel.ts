@@ -212,7 +212,10 @@ export class JobsSheet implements Component {
 		const detail = selected && this.#inspect(selected.id);
 		if (detail) {
 			if (selected.caption) {
-				for (const line of wrapTextWithAnsi(sanitizeText(selected.caption), Math.max(1, width - 3))) {
+				for (const line of wrapTextWithAnsi(
+					shortenEmbeddedPaths(sanitizeText(selected.caption)),
+					Math.max(1, width - 3),
+				)) {
 					lines.push(`   ${theme.fg("muted", line)}`);
 				}
 			}

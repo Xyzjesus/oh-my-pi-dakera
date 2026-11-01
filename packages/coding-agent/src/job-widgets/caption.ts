@@ -7,18 +7,21 @@
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { UserMessage } from "@oh-my-pi/pi-ai";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { prompt, truncate } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import systemPrompt from "../prompts/system/job-caption-system.md" with { type: "text" };
 import userPrompt from "../prompts/system/job-caption-user.md" with { type: "text" };
 import { type ModelJobWidgetAuthorOptions, redactWidgetSample, resolveWidgetModel } from "./author";
-import type { JobWidgetBrief } from "./types";
 
 /**
- * Writes the caption of a command's job; resolves `undefined` when no model
- * can write one or the reply holds no usable line.
+ * Writes the caption of a command started with `intent`; resolves
+ * `undefined` when no model can write one or the reply holds no usable line.
  */
-export type JobCaptionWriter = (brief: JobWidgetBrief, signal: AbortSignal) => Promise<string | undefined>;
+export type JobCaptionWriter = (
+	command: string,
+	intent: string | undefined,
+	signal: AbortSignal,
+) => Promise<string | undefined>;
 
 /** Longest command a reader takes in at a glance; anything with shell control flow is never one. */
 const GLANCEABLE_COMMAND_CHARS = 60;
@@ -31,21 +34,22 @@ const MAX_CAPTION_CHARS = 200;
 
 /**
  * Whether a command needs explaining: one longer than a glance or using
- * shell control flow (`;`, pipes, `&&`, substitutions, several lines).
+ * shell control flow (`;`, pipes, `&`, substitutions, several lines);
+ * redirections like `2>&1` are not control flow.
  */
 export function needsJobCaption(command: string): boolean {
 	const trimmed = command.trim();
-	return trimmed.length > GLANCEABLE_COMMAND_CHARS || /[\n;|&`]|\$\(/.test(trimmed);
+	return trimmed.length > GLANCEABLE_COMMAND_CHARS || /[\n;|&`]|\$\(/.test(trimmed.replace(/\d*>&\d*|&>/g, ""));
 }
 
-/** The caption in a model reply: its first non-empty line, unquoted, without list markers or a final period. */
+/** The caption in a model reply: its first non-empty line as plain text, unquoted, without list markers or a final period. */
 export function normalizeJobCaption(reply: string): string | undefined {
 	const line = reply
 		.split("\n")
 		.map(text => text.trim())
 		.find(text => text.length > 0);
 	if (!line) return undefined;
-	const caption = line
+	const caption = sanitizeText(line)
 		.replace(/^(?:[-*•]\s+|caption:\s*)/i, "")
 		.replace(/^["'`“”]+|["'`“”]+$/g, "")
 		.replace(/\s+/g, " ")
@@ -56,8 +60,7 @@ export function normalizeJobCaption(reply: string): string | undefined {
 
 /** A {@link JobCaptionWriter} backed by the `widget` model role. */
 export function createModelJobCaptionWriter(options: ModelJobWidgetAuthorOptions): JobCaptionWriter {
-	return async (brief, signal) => {
-		if (!brief.command) return undefined;
+	return async (command, intent, signal) => {
 		const sessionId = options.sessionId();
 		const model = await resolveWidgetModel(options.settings, options.modelRegistry, sessionId, signal);
 		if (!model) return undefined;
@@ -65,7 +68,6 @@ export function createModelJobCaptionWriter(options: ModelJobWidgetAuthorOptions
 		costGate?.admit();
 		const obfuscate = options.obfuscate?.();
 		const redact = (text: string): string => redactWidgetSample(text, obfuscate);
-		const intent = brief.intent?.trim();
 		const message: UserMessage = {
 			role: "user",
 			content: [
@@ -73,7 +75,7 @@ export function createModelJobCaptionWriter(options: ModelJobWidgetAuthorOptions
 					type: "text",
 					text: prompt.render(userPrompt, {
 						intent: intent ? truncate(redact(intent), MAX_INTENT_CHARS) : undefined,
-						command: truncate(redact(brief.command.trim()), MAX_COMMAND_CHARS),
+						command: truncate(redact(command.trim()), MAX_COMMAND_CHARS),
 					}),
 				},
 			],

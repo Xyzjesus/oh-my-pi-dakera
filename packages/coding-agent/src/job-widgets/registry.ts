@@ -1,8 +1,8 @@
 /**
  * The widgets of one root session's jobs: derives each shown job's view from
  * its live output, asks the cheap model for a spec once the job has output
- * worth describing (and for a caption of a command that needs explaining),
- * and pushes refreshed views to subscribers while jobs run.
+ * worth describing, and pushes refreshed views to subscribers while jobs run.
+ * The same model captions long commands once they have run a while.
  */
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -26,9 +26,9 @@ export interface JobWidgetsOptions {
 	refreshMs?: number;
 	/** Minimum time between two reads of one job's sources. */
 	minIngestMs?: number;
-	/** Job age before a spec or a caption may be requested. */
+	/** Job age before a spec may be requested or a caption is. */
 	authorAfterMs?: number;
-	/** Spec and caption requests in flight at once, across jobs. */
+	/** Spec requests in flight at once, across jobs. */
 	maxInFlight?: number;
 	/** Spec requests (each with its one retry) per job. */
 	maxAttempts?: number;
@@ -75,14 +75,13 @@ interface WidgetEntry {
 	skippedWatch?: string;
 	/** A spec dropped for no longer fitting the output, sent back as rejected with the next request. */
 	misfit?: { answer: string; errors: string[] };
-	/** Whether the job's caption was decided: requested once, or found unneeded. */
-	captionAsked: boolean;
-	captionRequest?: AbortController;
 }
 
 /** {@link JobWidgetRegistry} for one root `AsyncJobManager`. */
 export class JobWidgets implements JobWidgetRegistry {
 	readonly #entries = new Map<string, WidgetEntry>();
+	/** Pending and in-flight captions, by job id. */
+	readonly #captions = new Map<string, { timer: NodeJS.Timeout; request: AbortController }>();
 	readonly #listeners = new Set<() => void>();
 	readonly #author: JobWidgetAuthor | undefined;
 	readonly #captioner: JobCaptionWriter | undefined;
@@ -112,53 +111,41 @@ export class JobWidgets implements JobWidgetRegistry {
 	view(job: AsyncJob): JobWidgetView | undefined {
 		if (this.#disposed || !job.widgetInputs) return undefined;
 		if (!this.#enabled()) {
-			const entry = this.#entries.get(job.id);
-			entry?.request?.abort();
-			entry?.captionRequest?.abort();
+			this.#entries.get(job.id)?.request?.abort();
 			this.#syncTimer();
 			return undefined;
 		}
-		const entry = this.#entry(job);
+		let entry = this.#entries.get(job.id);
+		if (!entry || entry.job !== job) {
+			entry?.request?.abort();
+			const runtime = new JobWidgetRuntime(undefined, job.startTime, this.#now);
+			entry = {
+				job,
+				runtime,
+				view: runtime.view({ label: job.intent ?? job.label, authoring: false }),
+				viewKey: "",
+				lastIngestAt: Number.NEGATIVE_INFINITY,
+				shown: false,
+				frozen: false,
+				attempts: 0,
+				authorUnavailable: false,
+				specHadWatch: false,
+			};
+			this.#entries.set(job.id, entry);
+		}
 		entry.shown = true;
 		this.#refresh(entry, false);
 		this.#syncTimer();
 		return entry.view;
 	}
 
-	requestCaption(job: AsyncJob): void {
-		if (this.#disposed || !job.widgetInputs || !this.#enabled() || job.status !== "running") return;
-		let brief: JobWidgetBrief;
-		try {
-			brief = job.widgetInputs.brief();
-		} catch (error) {
-			logger.warn("Job caption brief failed", { jobId: job.id, error: String(error) });
-			return;
-		}
-		this.#maybeCaption(this.#entry(job), brief, this.#now());
-	}
-
-	/** The job's entry, made fresh for a job not seen before or a new job reusing an id. */
-	#entry(job: AsyncJob): WidgetEntry {
-		const existing = this.#entries.get(job.id);
-		if (existing?.job === job) return existing;
-		existing?.request?.abort();
-		existing?.captionRequest?.abort();
-		const runtime = new JobWidgetRuntime(undefined, job.startTime, this.#now);
-		const entry: WidgetEntry = {
-			job,
-			runtime,
-			view: runtime.view({ label: job.intent || job.label, authoring: false }),
-			viewKey: "",
-			lastIngestAt: Number.NEGATIVE_INFINITY,
-			shown: false,
-			frozen: false,
-			attempts: 0,
-			authorUnavailable: false,
-			specHadWatch: false,
-			captionAsked: false,
-		};
-		this.#entries.set(job.id, entry);
-		return entry;
+	scheduleCaption(job: AsyncJob): void {
+		const command = job.process?.command;
+		if (this.#disposed || !this.#captioner || !command || !needsJobCaption(command)) return;
+		const request = new AbortController();
+		const timer = setTimeout(() => void this.#writeCaption(job, command, request), this.#options.authorAfterMs);
+		timer.unref();
+		this.#captions.set(job.id, { timer, request });
 	}
 
 	subscribe(listener: () => void): () => void {
@@ -171,20 +158,18 @@ export class JobWidgets implements JobWidgetRegistry {
 	}
 
 	forget(jobId: string): void {
+		this.#cancelCaption(jobId);
 		const entry = this.#entries.get(jobId);
 		if (!entry) return;
 		entry.request?.abort();
-		entry.captionRequest?.abort();
 		this.#entries.delete(jobId);
 		this.#syncTimer();
 	}
 
 	dispose(): void {
 		this.#disposed = true;
-		for (const entry of this.#entries.values()) {
-			entry.request?.abort();
-			entry.captionRequest?.abort();
-		}
+		for (const entry of this.#entries.values()) entry.request?.abort();
+		for (const jobId of this.#captions.keys()) this.#cancelCaption(jobId);
 		this.#entries.clear();
 		this.#listeners.clear();
 		this.#syncTimer();
@@ -216,14 +201,13 @@ export class JobWidgets implements JobWidgetRegistry {
 			entry.request?.abort();
 		} else {
 			this.#maybeAuthor(entry, brief, now);
-			this.#maybeCaption(entry, brief, now);
 		}
 		return this.#recompute(entry, brief);
 	}
 
 	#recompute(entry: WidgetEntry, brief: JobWidgetBrief): boolean {
 		const view = entry.runtime.view({
-			label: entry.job.intent || entry.job.label,
+			label: entry.job.intent ?? entry.job.label,
 			stage: brief.stage,
 			// A subagent's tool results are file contents and search hits; only a command's newest line says what it does.
 			lineStage: brief.kind === "bash",
@@ -261,46 +245,27 @@ export class JobWidgets implements JobWidgetRegistry {
 		void this.#writeSpec(entry, brief, previous);
 	}
 
-	/**
-	 * Ask once for a caption of a command that needs explaining, once the job
-	 * is old enough to be worth one. Reached only for a job someone looks at:
-	 * a shown widget, or a listing ({@link requestCaption}).
-	 */
-	#maybeCaption(entry: WidgetEntry, brief: JobWidgetBrief, now: number): void {
-		if (entry.captionAsked || !this.#captioner) return;
-		if (brief.kind !== "bash" || !brief.command) return;
-		if (now - entry.job.startTime < this.#options.authorAfterMs || this.#inFlight >= this.#options.maxInFlight) {
-			return;
+	/** Writes the caption of a job still running when its delay ran out, unless widgets are off. */
+	async #writeCaption(job: AsyncJob, command: string, request: AbortController): Promise<void> {
+		try {
+			if (job.status !== "running" || !this.#enabled()) return;
+			const caption = await this.#captioner?.(command, job.intent, request.signal);
+			if (!caption || request.signal.aborted) return;
+			job.caption = caption;
+			this.#notify();
+		} catch (error) {
+			if (!request.signal.aborted) logger.debug("Job caption failed", { jobId: job.id, error: String(error) });
+		} finally {
+			if (this.#captions.get(job.id)?.request === request) this.#captions.delete(job.id);
 		}
-		entry.captionAsked = true;
-		if (needsJobCaption(brief.command)) void this.#writeCaption(entry, brief);
 	}
 
-	async #writeCaption(entry: WidgetEntry, brief: JobWidgetBrief): Promise<void> {
-		const captioner = this.#captioner;
-		if (!captioner) return;
-		const controller = new AbortController();
-		entry.captionRequest = controller;
-		this.#inFlight += 1;
-		let caption: string | undefined;
-		try {
-			caption = await captioner(brief, controller.signal);
-		} catch (error) {
-			if (!controller.signal.aborted)
-				logger.debug("Job caption failed", { jobId: entry.job.id, error: String(error) });
-		} finally {
-			this.#inFlight -= 1;
-			if (entry.captionRequest === controller) entry.captionRequest = undefined;
-		}
-		if (this.#entries.get(entry.job.id) !== entry) return;
-		// Cancelled while widgets were turned off: ask again once they are back on.
-		if (controller.signal.aborted) {
-			entry.captionAsked = false;
-			return;
-		}
+	#cancelCaption(jobId: string): void {
+		const caption = this.#captions.get(jobId);
 		if (!caption) return;
-		entry.job.caption = caption;
-		this.#notify();
+		clearTimeout(caption.timer);
+		caption.request.abort();
+		this.#captions.delete(jobId);
 	}
 
 	#reauthorReason(entry: WidgetEntry, brief: JobWidgetBrief, now: number): string | undefined {
@@ -444,10 +409,7 @@ export class JobWidgets implements JobWidgetRegistry {
 
 	#tick(): void {
 		if (!this.#enabled()) {
-			for (const entry of this.#entries.values()) {
-				entry.request?.abort();
-				entry.captionRequest?.abort();
-			}
+			for (const entry of this.#entries.values()) entry.request?.abort();
 			this.#syncTimer();
 			return;
 		}
