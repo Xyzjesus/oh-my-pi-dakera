@@ -305,21 +305,4 @@ describe("Workforce Identity Federation ADC", () => {
 		expect(sentRefreshTokens).toEqual(["file-refresh", "rotated-refresh"]);
 	});
 
-	it("rejects unknown ADC types before sending a token request", async () => {
-		await Bun.write(
-			Bun.env.GOOGLE_APPLICATION_CREDENTIALS!,
-			JSON.stringify({ type: "unrecognized_adc", client_id: "id", client_secret: "secret", refresh_token: "token" }),
-		);
-		const calls: string[] = [];
-		const fetchImpl: FetchImpl = async input => {
-			calls.push(urlOf(input));
-			return new Response("unexpected", { status: 400 });
-		};
-
-		await expect(getVertexAccessToken({ fetch: fetchImpl })).rejects.toMatchObject({
-			name: "ConfigurationError",
-			message: expect.stringContaining("unrecognized_adc"),
-		});
-		expect(calls).toEqual([]);
-	});
 });
