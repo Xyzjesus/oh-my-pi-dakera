@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed newly discovered OpenAI-compatible models ignoring provider-reported context and output token limits ([#17561](https://github.com/can1357/oh-my-pi/pull/17561) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.14.2] - 2026-10-31
 
 ### Breaking Changes
