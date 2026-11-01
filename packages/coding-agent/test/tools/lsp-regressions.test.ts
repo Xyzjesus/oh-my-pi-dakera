@@ -6167,16 +6167,7 @@ describe("lsp regressions", () => {
 		}
 	});
 
-	describe("reload cancellation and truthful teardown (#6369)", () => {
-		// A JSON-RPC error response the client maps to isMethodNotFoundError, so a
-		// rust-analyzer server whose reloadWorkspace is unsupported falls through
-		// to the generic `workspace/didChangeConfiguration` reload.
-		const methodNotFound = (id: RpcMessage["id"]): RpcMessage => ({
-			jsonrpc: "2.0",
-			id,
-			error: { code: -32_601, message: "method not found" },
-		});
-
+	describe("reload and truthful teardown", () => {
 		it("refreshes open document diagnostics after a generic reload", async () => {
 			const tempDir = TempDir.createSync("@omp-lsp-reload-diagnostics-");
 			try {
@@ -6238,131 +6229,82 @@ describe("lsp regressions", () => {
 			}
 		});
 
-		it("propagates cancellation of the reload request instead of reporting Restarted", async () => {
-			const tempDir = TempDir.createSync("@omp-lsp-reload-cancel-req-");
-			try {
-				const server = installFakeLsp((message, srv) => {
-					if (message.method === "initialize") {
-						srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
-					} else if (message.method === "shutdown") {
-						srv.send({ jsonrpc: "2.0", id: message.id, result: null });
-					} else if (message.method === "exit") {
-						srv.exit(0);
-					}
-					// rust-analyzer/reloadWorkspace is left pending: only the caller
-					// signal decides its fate.
-				});
-				const config: ServerConfig = { command: "rust-analyzer", fileTypes: [".ts"], rootMarkers: [] };
-				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { fake: config }, idleTimeoutMs: undefined });
+		for (const reloadFile of ["*", "crate_b/src/lib.rs"]) {
+			it(`restarts rust-analyzer so a new crate becomes analyzable after reload ${reloadFile}`, async () => {
+				const tempDir = TempDir.createSync("@omp-lsp-new-crate-reload-");
+				try {
+					const cwd = tempDir.path();
+					const first = path.join(cwd, "crate_a", "src", "lib.rs");
+					const added = path.join(cwd, "crate_b", "src", "lib.rs");
+					await Bun.write(path.join(cwd, "rust-analyzer.toml"), "");
+					await Bun.write(
+						path.join(cwd, "crate_a", "Cargo.toml"),
+						'[package]\nname = "crate_a"\nversion = "0.1.0"\n',
+					);
+					await Bun.write(first, "pub fn crate_a() {}\n");
+					const config: ServerConfig = {
+						command: "rust-analyzer",
+						fileTypes: [".rs"],
+						rootMarkers: ["rust-analyzer.toml"],
+					};
+					vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+						servers: { "rust-analyzer": config },
+						idleTimeoutMs: undefined,
+					});
 
-				const tool = new LspTool(makeLspSession(tempDir.path()));
-				const controller = new AbortController();
-				const pending = tool.execute("reload-cancel-req", { action: "reload", file: "*" }, controller.signal);
-				await server.waitFor(m => m.method === "rust-analyzer/reloadWorkspace");
-				controller.abort(new ToolAbortError());
+					let discovered = false;
+					const serve = (message: RpcMessage, server: FakeLspServer) => {
+						if (message.method === "initialize") {
+							discovered = fs.existsSync(path.join(cwd, "crate_b", "Cargo.toml"));
+							server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { hoverProvider: true } } });
+						} else if (message.method === "textDocument/hover") {
+							server.send({
+								jsonrpc: "2.0",
+								id: message.id,
+								result: discovered ? { contents: "crate_b loaded" } : null,
+							});
+						} else if (message.method === "rust-analyzer/reloadWorkspace") {
+							server.send({ jsonrpc: "2.0", id: message.id, result: null });
+						} else if (message.method === "shutdown") {
+							server.send({ jsonrpc: "2.0", id: message.id, result: null });
+						} else if (message.method === "exit") {
+							server.exit(0);
+						}
+					};
+					const firstServer = installFakeLsp(serve);
+					const client = await lspClient.getOrCreateClient(config, cwd);
+					await lspClient.ensureFileOpen(client, first);
+					await Bun.write(
+						path.join(cwd, "crate_b", "Cargo.toml"),
+						'[package]\nname = "crate_b"\nversion = "0.1.0"\n',
+					);
+					await Bun.write(added, "pub fn crate_b() {}\n");
+					const hoverParams = {
+						textDocument: { uri: fileToUri(added) },
+						position: { line: 0, character: 8 },
+					};
+					expect(await lspClient.sendRequest(client, "textDocument/hover", hoverParams)).toBeNull();
 
-				// Pre-fix, the bare `catch` swallowed the abort, fell through to the
-				// notification (also aborted), hit the second bare `catch`, killed
-				// the process, and returned "Restarted".
-				await expect(pending).rejects.toBeInstanceOf(ToolAbortError);
-			} finally {
-				vi.restoreAllMocks();
-				await lspClient.shutdownAll();
-				tempDir.removeSync();
-			}
-		});
+					const result = await new LspTool(makeLspSession(cwd)).execute("reload-new-crate", {
+						action: "reload",
+						file: reloadFile,
+					});
+					expect(textResult(result)).toContain("Restarted rust-analyzer");
+					expect(firstServer.received.some(message => message.method === "shutdown")).toBe(true);
 
-		it("propagates cancellation that arrives during the notification fallback", async () => {
-			const tempDir = TempDir.createSync("@omp-lsp-reload-cancel-fallback-");
-			const controller = new AbortController();
-			try {
-				installFakeLsp((message, srv) => {
-					if (message.method === "initialize") {
-						srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
-					} else if (message.method === "rust-analyzer/reloadWorkspace") {
-						// Fall through to the generic reload, then cancel before it lands.
-						srv.send(methodNotFound(message.id));
-						controller.abort(new ToolAbortError());
-					} else if (message.method === "shutdown") {
-						srv.send({ jsonrpc: "2.0", id: message.id, result: null });
-					} else if (message.method === "exit") {
-						srv.exit(0);
-					}
-				});
-				const config: ServerConfig = { command: "rust-analyzer", fileTypes: [".ts"], rootMarkers: [] };
-				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { fake: config }, idleTimeoutMs: undefined });
-
-				const tool = new LspTool(makeLspSession(tempDir.path()));
-				const pending = tool.execute("reload-cancel-fb", { action: "reload", file: "*" }, controller.signal);
-
-				await expect(pending).rejects.toBeInstanceOf(ToolAbortError);
-			} finally {
-				vi.restoreAllMocks();
-				await lspClient.shutdownAll();
-				tempDir.removeSync();
-			}
-		});
-
-		it("still falls back to the generic reload on method-not-found without killing the server", async () => {
-			const tempDir = TempDir.createSync("@omp-lsp-reload-fallback-ok-");
-			try {
-				const server = installFakeLsp((message, srv) => {
-					if (message.method === "initialize") {
-						srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
-					} else if (message.method === "rust-analyzer/reloadWorkspace") {
-						expect(message.params).toBeUndefined();
-						srv.send(methodNotFound(message.id));
-					} else if (message.method === "shutdown") {
-						srv.send({ jsonrpc: "2.0", id: message.id, result: null });
-					} else if (message.method === "exit") {
-						srv.exit(0);
-					}
-				});
-				const config: ServerConfig = { command: "rust-analyzer", fileTypes: [".ts"], rootMarkers: [] };
-				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { fake: config }, idleTimeoutMs: undefined });
-
-				const tool = new LspTool(makeLspSession(tempDir.path()));
-				const result = await tool.execute("reload-fallback", { action: "reload", file: "*" });
-
-				expect(textResult(result)).toContain("Reloaded fake");
-				expect(server.killed).toBe(false);
-			} finally {
-				vi.restoreAllMocks();
-				await lspClient.shutdownAll();
-				tempDir.removeSync();
-			}
-		});
-
-		it("recognizes -32601 by code even when the server's message text is nonstandard", async () => {
-			const tempDir = TempDir.createSync("@omp-lsp-reload-fallback-code-");
-			try {
-				const server = installFakeLsp((message, srv) => {
-					if (message.method === "initialize") {
-						srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
-					} else if (message.method === "rust-analyzer/reloadWorkspace") {
-						// None of isMethodNotFoundError's message substrings — only the
-						// JSON-RPC code identifies this as method-not-found.
-						srv.send({ jsonrpc: "2.0", id: message.id, error: { code: -32_601, message: "Unknown request" } });
-					} else if (message.method === "shutdown") {
-						srv.send({ jsonrpc: "2.0", id: message.id, result: null });
-					} else if (message.method === "exit") {
-						srv.exit(0);
-					}
-				});
-				const config: ServerConfig = { command: "rust-analyzer", fileTypes: [".ts"], rootMarkers: [] };
-				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { fake: config }, idleTimeoutMs: undefined });
-
-				const tool = new LspTool(makeLspSession(tempDir.path()));
-				const result = await tool.execute("reload-fallback-code", { action: "reload", file: "*" });
-
-				expect(textResult(result)).toContain("Reloaded fake");
-				expect(server.killed).toBe(false);
-			} finally {
-				vi.restoreAllMocks();
-				await lspClient.shutdownAll();
-				tempDir.removeSync();
-			}
-		});
+					installFakeLsp(serve);
+					const restarted = await lspClient.getOrCreateClient(config, cwd);
+					await lspClient.ensureFileOpen(restarted, added);
+					expect(await lspClient.sendRequest(restarted, "textDocument/hover", hoverParams)).toEqual({
+						contents: "crate_b loaded",
+					});
+				} finally {
+					vi.restoreAllMocks();
+					await lspClient.shutdownAll();
+					tempDir.removeSync();
+				}
+			});
+		}
 
 		it("does not send rust-analyzer/reloadWorkspace to a non-rust server that crashes on it (#8571)", async () => {
 			const tempDir = TempDir.createSync("@omp-lsp-reload-non-rust-");

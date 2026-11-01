@@ -9,7 +9,6 @@ import {
 	notifySaved,
 	refreshOpenFiles,
 	sendNotification,
-	sendRequest,
 	shutdownClientInstance,
 	syncContent,
 	WARMUP_TIMEOUT_MS,
@@ -258,22 +257,10 @@ export function reloadConfigurationParams(config: ServerConfig): { settings: Rec
 
 export async function reloadServer(client: LspClient, serverName: string, signal?: AbortSignal): Promise<string> {
 	throwIfAborted(signal);
-	// rust-analyzer exposes a real reload request. Only rust-analyzer implements
-	// it, so gate the request on the binary (or registered name) rather than
-	// probing every server: some servers (Roslyn) crash the whole process on an
-	// unknown method instead of replying with method-not-found — killing the
-	// server `lsp reload` was meant to refresh (issue #8571, dotnet/roslyn#84890).
-	// A caller cancel or tool timeout must propagate, never be mistaken for an
-	// unsupported method and swallowed into a bogus "Restarted" (issue #6369).
+	// rust-analyzer/reloadWorkspace refreshes only projects discovered at initialize.
+	// A new crate under a non-Cargo workspace root needs fresh filesystem discovery.
 	if (isRustAnalyzerClient(client) || serverName === "rust-analyzer") {
-		try {
-			await sendRequest(client, "rust-analyzer/reloadWorkspace", undefined, signal);
-			return `Reloaded ${serverName}`;
-		} catch (err) {
-			throwIfAborted(signal);
-			if (!isMethodNotFoundError(err)) throw err;
-			// Method not supported — fall through to the generic reload.
-		}
+		return restartServer(client, serverName, signal);
 	}
 	// workspace/didChangeConfiguration is a notification per spec; sending it
 	// as a request hangs until the tool deadline on servers that route it to
@@ -284,22 +271,22 @@ export async function reloadServer(client: LspClient, serverName: string, signal
 	} catch {
 		throwIfAborted(signal);
 		// The reload notification could not be delivered — the connection is
-		// wedged or the process already died. Tear the client down (removing it
-		// from the registry by identity and awaiting confirmed process exit) so
-		// the next request cold-starts a fresh client. A kill that never confirms
-		// exit is not a restart: surface the teardown failure truthfully.
-		//
-		// On a broker-shared link a per-session teardown only detaches this
-		// process while the wedged server keeps serving everyone else — ask the
-		// mux to kill the shared server first (best-effort; it also severs us).
-		if (client.proc.sharedMux) {
-			await sendNotification(client, MUX_RESTART_METHOD, undefined, AbortSignal.timeout(2_000)).catch(() => {});
-		}
-		if (!(await shutdownClientInstance(client))) {
-			throw new Error(`Failed to restart ${serverName}: server process did not exit after kill`);
-		}
-		return `Restarted ${serverName}`;
+		// wedged or the process already died. A restart must confirm teardown.
+		return restartServer(client, serverName, signal);
 	}
 	await refreshOpenFiles(client, signal);
 	return `Reloaded ${serverName}`;
+}
+
+async function restartServer(client: LspClient, serverName: string, signal?: AbortSignal): Promise<string> {
+	throwIfAborted(signal);
+	// A session-only shutdown leaves a broker-shared process running. Kill the
+	// shared server before detaching so the next request initializes a new one.
+	if (client.proc.sharedMux) {
+		await sendNotification(client, MUX_RESTART_METHOD, undefined, signal);
+	}
+	if (!(await shutdownClientInstance(client))) {
+		throw new Error(`Failed to restart ${serverName}: server process did not exit after kill`);
+	}
+	return `Restarted ${serverName}`;
 }
