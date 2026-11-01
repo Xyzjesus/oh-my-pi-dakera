@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool's shell stopping with status 1 and no message after about 40 levels of nested functions, `eval` or `source` when the process may open only 1,024 files; a shell that runs out of open files now says so and names the limit to raise
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
