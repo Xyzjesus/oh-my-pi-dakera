@@ -7,9 +7,10 @@
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { UserMessage } from "@oh-my-pi/pi-ai";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { truncate } from "@oh-my-pi/pi-utils";
+import { prompt, truncate } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
-import systemPrompt from "../prompts/system/job-caption.md" with { type: "text" };
+import systemPrompt from "../prompts/system/job-caption-system.md" with { type: "text" };
+import userPrompt from "../prompts/system/job-caption-user.md" with { type: "text" };
 import { type ModelJobWidgetAuthorOptions, redactWidgetSample, resolveWidgetModel } from "./author";
 import type { JobWidgetBrief } from "./types";
 
@@ -65,18 +66,17 @@ export function createModelJobCaptionWriter(options: ModelJobWidgetAuthorOptions
 		const obfuscate = options.obfuscate?.();
 		const redact = (text: string): string => redactWidgetSample(text, obfuscate);
 		const intent = brief.intent?.trim();
-		const lines = [
-			"<job>",
-			...(intent ? [`Why it was started: ${truncate(redact(intent), MAX_INTENT_CHARS)}`] : []),
-			"Command:",
-			"```",
-			truncate(redact(brief.command.trim()), MAX_COMMAND_CHARS),
-			"```",
-			"</job>",
-		];
 		const message: UserMessage = {
 			role: "user",
-			content: [{ type: "text", text: lines.join("\n") }],
+			content: [
+				{
+					type: "text",
+					text: prompt.render(userPrompt, {
+						intent: intent ? truncate(redact(intent), MAX_INTENT_CHARS) : undefined,
+						command: truncate(redact(brief.command.trim()), MAX_COMMAND_CHARS),
+					}),
+				},
+			],
 			timestamp: Date.now(),
 		};
 		// The system prompt is the reusable prefix; the command never repeats.
