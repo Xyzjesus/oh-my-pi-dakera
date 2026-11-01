@@ -16,10 +16,16 @@ const RUST_AFFECTING_FILE_NAMES = [
 ] as const satisfies readonly string[];
 // The trunks a checkout is measured against: `main` on a fork's `upstream` remote
 // and on `origin`. Remote-tracking refs only, because a local `main` can carry the
-// very commits being checked. Each of these remotes that is configured must have
-// its `main` fetched, and the task runs if the branch changed Rust against any of
-// them: a missing or disagreeing trunk is uncertainty, not evidence.
+// very commits being checked. Each of these remotes that is configured must call
+// `main` its default branch and have it fetched, and the task runs if the branch
+// changed Rust against any of them: a missing, disagreeing or unconfirmed trunk is
+// uncertainty, not evidence.
 const TRUNK_REMOTES = ["upstream", "origin"] as const satisfies readonly string[];
+// How long the gate waits for a remote to name its default branch. It asks only a
+// remote with no recorded default (`git clone` records one; `git remote add` and
+// `git fetch` do not), and asks them all at once, so a remote that never answers
+// delays the run by this much at most, and the run then goes ahead.
+const REMOTE_ANSWER_TIMEOUT_MS = 10_000;
 // Vendored path-patched crates are workspace members for Bazel hermeticity
 // (path-patch rendering is machine-local), but cargo dev tasks keep their
 // historical scope: the forks are not held to workspace format/lint/test gates.
@@ -225,11 +231,34 @@ async function collectBranchChanges(): Promise<BranchChanges> {
 	if (!status.ok) return { unknown: status.error };
 	const uncommitted = getChangedPathsFromPorcelain(status.text);
 
+	// Asked together, so remotes that never answer cost one timeout, not one each.
+	const defaultBranches = await Promise.all(trunkRemotes.map(getDefaultBranch));
 	const trunks: TrunkChanges[] = [];
-	for (const remote of trunkRemotes) {
+	for (const [index, remote] of trunkRemotes.entries()) {
+		const defaultBranch = defaultBranches[index];
+		// A `main` that is not the remote's trunk is only another branch, and a branch
+		// it already holds diffs clean against it. An unconfirmed `main` is no better.
+		if ("unknown" in defaultBranch) {
+			return {
+				unknown: `could not learn ${remote}'s default branch: ${defaultBranch.unknown}; the Rust half keeps running`,
+			};
+		}
+		if (defaultBranch.branch !== "main") {
+			return {
+				unknown: `${remote}'s default branch is ${defaultBranch.branch}, not main, and this gate compares only against main, so it runs on every check here`,
+			};
+		}
 		const trunk = `${remote}/main`;
 		const tip = await git("rev-parse", "--verify", "--quiet", `refs/remotes/${trunk}^{commit}`);
-		if (!tip.ok) return await missingTrunk(remote);
+		if (!tip.ok) {
+			// The fetch names its destination because a plain `git fetch <remote> main`
+			// only writes FETCH_HEAD when the remote's refspec leaves `main` out, as a
+			// single-branch clone's does.
+			return {
+				unknown: `the ${remote} remote has no fetched main`,
+				cure: `git fetch ${remote} main:refs/remotes/${remote}/main`,
+			};
+		}
 		const mergeBase = await git("merge-base", "HEAD", tip.text.trim());
 		if (!mergeBase.ok) return { unknown: `no merge base between HEAD and ${trunk}` };
 		const base = mergeBase.text.trim();
@@ -243,23 +272,47 @@ async function collectBranchChanges(): Promise<BranchChanges> {
 }
 
 /**
- * Why a configured remote has no `main` to measure against, and the command that
- * fixes it when there is one. The fetch names its destination because a plain
- * `git fetch <remote> main` only writes FETCH_HEAD when the remote's refspec
- * leaves `main` out, as a single-branch clone's does.
+ * The branch `remote` calls its trunk: the `refs/remotes/<remote>/HEAD` that
+ * `git clone` records, else the remote's own answer. A remote added with
+ * `git remote add` and fetched records none, and guessing `main` for it told a
+ * `master` repository to fetch a `main` it does not have.
  */
-async function missingTrunk(remote: string): Promise<BranchChanges> {
-	const head = await git("symbolic-ref", "--quiet", `refs/remotes/${remote}/HEAD`);
-	const defaultBranch = head.ok ? head.text.trim().slice(`refs/remotes/${remote}/`.length) : "main";
-	if (defaultBranch !== "main") {
-		return {
-			unknown: `${remote}'s default branch is ${defaultBranch}, not main, and this gate compares only against main, so it runs on every check here`,
-		};
+async function getDefaultBranch(remote: string): Promise<{ branch: string } | { unknown: string }> {
+	const prefix = `refs/remotes/${remote}/`;
+	const recorded = await git("symbolic-ref", "--quiet", `${prefix}HEAD`);
+	if (recorded.ok) return { branch: recorded.text.trim().slice(prefix.length) };
+	const advertised = await gitAskingRemote("ls-remote", "--symref", remote, "HEAD");
+	if (!advertised.ok) return { unknown: advertised.error };
+	const branch = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(advertised.text)?.[1];
+	return branch === undefined ? { unknown: "its answer names none" } : { branch };
+}
+
+/**
+ * `git` for a command that talks to a remote: it never prompts, and it gives up
+ * after REMOTE_ANSWER_TIMEOUT_MS. A timeout stops git without waiting for its
+ * output streams, so a remote that never answers cannot delay the Rust gate.
+ */
+async function gitAskingRemote(...args: string[]): Promise<GitResult> {
+	const child = Bun.spawn(["git", ...args], {
+		cwd: repoRoot,
+		env: { ...Bun.env, GIT_TERMINAL_PROMPT: "0" },
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const finished = Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+	const { promise: timedOut, resolve } = Promise.withResolvers<"timed out">();
+	const timer = setTimeout(() => resolve("timed out"), REMOTE_ANSWER_TIMEOUT_MS);
+	const outcome = await Promise.race([finished, timedOut]);
+	clearTimeout(timer);
+	if (outcome === "timed out") {
+		child.kill("SIGKILL");
+		return { ok: false, error: `git ${args[0]} got no answer within ${REMOTE_ANSWER_TIMEOUT_MS / 1000} s` };
 	}
-	return {
-		unknown: `the ${remote} remote has no fetched main`,
-		cure: `git fetch ${remote} main:refs/remotes/${remote}/main`,
-	};
+	const [exitCode, stdout, stderr] = outcome;
+	if (exitCode === 0) return { ok: true, text: stdout };
+	const firstLine = stderr.trim().split("\n")[0];
+	return { ok: false, error: `git ${args[0]}: ${firstLine || `exit ${exitCode}`}` };
 }
 
 async function git(...args: string[]): Promise<GitResult> {

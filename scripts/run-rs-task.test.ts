@@ -15,6 +15,9 @@ const cleanups: (() => Promise<void>)[] = [];
 // Each case builds and clones a repository and spawns bun; on a loaded host
 // that outruns bun's 5 s default.
 const CASE_TIMEOUT_MS = 30_000;
+// The gate waits up to 10 s for a silent remote, on top of the usual setup; the
+// fake remote stays silent for 60 s, so a gate with no bound still fails here.
+const SILENT_REMOTE_CASE_TIMEOUT_MS = 45_000;
 
 afterEach(async () => {
 	for (const cleanup of cleanups.splice(0)) await cleanup();
@@ -331,6 +334,102 @@ describe.skipIf(process.platform === "win32")("run-rs-task.ts check:rs", () => {
 			expect(result.output).not.toContain("To let it skip");
 		},
 		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: a remote added with `git remote add` and fetched has no local
+	// `refs/remotes/origin/HEAD`. A gate that assumes `main` there tells a
+	// master-trunk contributor to fetch a `main` that does not exist: the fetch
+	// exits 128 and the next run prints the same advice again.
+	test(
+		"a master-only remote added and fetched by hand runs the Rust gate and prints no cure",
+		async () => {
+			const fixture = await makeFixture();
+			await git(fixture.origin, "branch", "-q", "-m", "main", "master");
+			const work = path.join(fixture.root, "remote-added");
+			await git(fixture.root, "init", "-q", "-b", "main", work);
+			await git(work, "remote", "add", "origin", `file://${fixture.origin}`);
+			await git(work, "fetch", "-q", "origin");
+			await git(work, "reset", "-q", "--hard", "origin/master");
+
+			const { cures, result } = await followCures(fixture, work);
+
+			expect(cures).toEqual([]);
+			expect(result.cargoRan).toBe(true);
+			expect(result.output).toContain("origin's default branch is master");
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: on a remote whose trunk is `master`, a branch that happens to be
+	// called `main` (here it already holds the feature's commit) is taken as the
+	// trunk, the diff against it is empty, and the gate skips a committed Rust change.
+	test(
+		"a remote whose default branch is master runs the Rust gate even though it also has a main",
+		async () => {
+			const fixture = await makeFixture();
+			await git(fixture.origin, "branch", "-q", "-m", "main", "master");
+			const clone = path.join(fixture.root, "master-clone");
+			await git(fixture.root, "clone", "-q", fixture.origin, clone);
+			await git(clone, "switch", "-q", "-c", "feature");
+			await commitFile(clone, "crates/x/src/lib.rs", "pub fn x() -> u8 { 6 }\n", "rust change");
+			await git(clone, "push", "-q", "origin", "HEAD:refs/heads/main");
+
+			const { cures, result } = await followCures(fixture, clone);
+
+			expect(cures).toEqual([]);
+			expect(result.cargoRan).toBe(true);
+			expect(result.output).toContain("origin's default branch is master");
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: offline, or with a remote that is gone, the gate cannot learn the
+	// trunk, trusts the `main` it fetched earlier, and skips a Rust change that `main`
+	// already holds; or it prints a fetch that cannot work.
+	test(
+		"a remote that cannot be reached runs the Rust gate instead of trusting its fetched main, and prints no cure",
+		async () => {
+			const fixture = await makeFixture();
+			await git(fixture.origin, "branch", "-q", "-m", "main", "master");
+			const work = path.join(fixture.root, "remote-added");
+			await git(fixture.root, "init", "-q", "-b", "main", work);
+			await git(work, "remote", "add", "origin", `file://${fixture.origin}`);
+			await git(work, "fetch", "-q", "origin");
+			await git(work, "reset", "-q", "--hard", "origin/master");
+			await commitFile(work, "crates/x/src/lib.rs", "pub fn x() -> u8 { 7 }\n", "rust change");
+			await git(work, "push", "-q", "origin", "HEAD:refs/heads/main");
+			await git(work, "remote", "set-url", "origin", `file://${path.join(fixture.root, "gone")}`);
+
+			const { cures, result } = await followCures(fixture, work);
+
+			expect(cures).toEqual([]);
+			expect(result.cargoRan).toBe(true);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain("the Rust half keeps running");
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: a remote that never answers (a dropped network, an SSH login
+	// that hangs) stalls every `bun check` until someone kills it, or the gate gives
+	// up and guesses a fetch of `main`.
+	test(
+		"a remote that never answers runs the Rust gate once the 10 s bound passes, and prints no cure",
+		async () => {
+			const fixture = await makeFixture();
+			const hungSsh = path.join(fixture.shimDir, "hung-ssh");
+			await writeExecutable(hungSsh, "#!/bin/sh\nexec sleep 60\n");
+			await git(fixture.work, "remote", "set-head", "origin", "--delete");
+			await git(fixture.work, "update-ref", "-d", "refs/remotes/origin/main");
+			await git(fixture.work, "remote", "set-url", "origin", "ssh://git@example.invalid/oh-my-pi.git");
+
+			const result = await runCheckRs(fixture, fixture.work, { GIT_SSH_COMMAND: hungSsh });
+
+			expect(result.cargoRan).toBe(true);
+			expect(result.output).toContain("no answer within 10 s");
+			expect(result.output).not.toContain("To let it skip");
+		},
+		SILENT_REMOTE_CASE_TIMEOUT_MS,
 	);
 
 	// Failure mode: `test:rs` is `cargo nextest run`, which reads this file; a branch
