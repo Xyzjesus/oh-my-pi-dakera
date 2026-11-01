@@ -97,6 +97,19 @@ describe("worktree isolation helpers", () => {
 		expect((await fs.readdir(mounted)).sort()).toEqual([".omp-retained-backend.json", "m", "upper"]);
 		expect(await readRetainedMountBackend(mounted)).toBe(natives.IsoBackendKind.Overlayfs);
 
+		// Sidecar write fails (a directory squats its path): still kept, no throw.
+		const unrecorded = path.join(root, "unrecorded");
+		await fs.mkdir(path.join(unrecorded, "m"), { recursive: true });
+		await fs.mkdir(path.join(unrecorded, "upper"));
+		await fs.mkdir(path.join(unrecorded, ".omp-retained-backend.json"));
+		await cleanupIsolation({
+			mergedDir: path.join(unrecorded, "m"),
+			backend: natives.IsoBackendKind.Overlayfs,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		expect(await fs.exists(path.join(unrecorded, "upper"))).toBe(true);
+
 		// Copy backends have no mount to traverse: removal still proceeds.
 		const copied = path.join(root, "rcopy");
 		await fs.mkdir(path.join(copied, "m"), { recursive: true });

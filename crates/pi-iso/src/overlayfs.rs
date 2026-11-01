@@ -379,8 +379,11 @@ mod imp {
 
 			let lazy_ok = root.join("lazy-ok");
 			fs::create_dir_all(&lazy_ok).expect("create lazy-ok");
-			let program =
-				shim(&lazy_ok, "fusermount3", &format!("case \" $* \" in *\" -z \"*) exit 0;; esac\n{busy}"));
+			let program = shim(
+				&lazy_ok,
+				"fusermount3",
+				&format!("case \" $* \" in *\" -z \"*) exit 0;; esac\n{busy}"),
+			);
 			fuse_umount_with(&[program.as_str()], &merged).expect("lazy unmount succeeds");
 			let m = merged.display();
 			assert_eq!(
@@ -395,7 +398,8 @@ mod imp {
 				let failing = root.join("failing");
 				fs::create_dir_all(&failing).expect("create failing");
 				let program = shim(&failing, "fusermount3", busy);
-				let err = fuse_umount_with(&[program.as_str()], &merged).expect_err("every attempt fails");
+				let err =
+					fuse_umount_with(&[program.as_str()], &merged).expect_err("every attempt fails");
 				let message = err.to_string();
 				assert!(message.contains("-u -z (exit 1)"), "{message}");
 				assert!(message.ends_with("Device or resource busy"), "{message}");
