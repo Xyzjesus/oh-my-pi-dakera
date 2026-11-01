@@ -58,6 +58,12 @@ unsubscribe();
 await session.dispose();
 ```
 
+## Process shutdown
+
+Importing the SDK does not install signal or uncaught-error handlers. The embedding host owns its process lifecycle; the `omp` CLI installs its own handlers at startup.
+
+If the host uses OMP resources with registered cleanup callbacks, call `postmortem.cleanup()` during the host's ordered shutdown, after disposing sessions. Import `postmortem` from `@oh-my-pi/pi-utils` (add it as a direct dependency). Manual cleanup runs without exiting the process; the host still chooses its exit code and handles its own failures.
+
 ## What `createAgentSession()` discovers by default
 
 `createAgentSession()` follows “provide to override, omit to discover”.
