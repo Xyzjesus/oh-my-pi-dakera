@@ -14,7 +14,7 @@ The `archive` object exists in JavaScript and Python Eval; it is not a standalon
 - Python: same names, keyword options: `await archive.sessions(project="*", limit=50)`.
 - Prompt history holds prompts typed into the interactive editor, one row per unique prompt tagged with its latest submission's project and session; subagent tasks and SDK/RPC prompts are absent.
 - Recaps are short summaries written when an interactive session goes idle; many sessions have none.
-- Full transcript: `read` the session `file` (raw JSONL), but ONLY for a narrow mechanical check — one path, one command line, one timestamp. For what a session concluded, changed, or already verified, spawn the `seance` agent with `sourceSession` set to that id or `file`: it reads the transcript in place and answers from it, while a raw read drags the JSONL into this context for every later turn.
+- Full transcript: `read` the session `file` (raw JSONL) ONLY for a narrow mechanical check. For what a session concluded or verified, spawn the `seance` agent with `sourceSession`; a raw read keeps the JSONL in context.
 </instruction>
 
 <examples>
@@ -30,7 +30,6 @@ await archive.sessions();
 const hits = await archive.search("migration", { project: "~/work/api", limit: 5, silent: true });
 const detail = await archive.session(hits[0].session);
 ```
-
 </examples>
 
 <critical>
