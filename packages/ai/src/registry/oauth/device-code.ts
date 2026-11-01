@@ -14,7 +14,7 @@ export type OAuthDeviceCodePollResult<T> =
 	| { status: "pending" }
 	/**
 	 * Provider asked to poll less often. Without `retryAfterMs` the interval grows by five
-	 * seconds (RFC 8628); with it the interval becomes at least that long. Never shrinks.
+	 * seconds (RFC 8628); with it only the next wait stretches to at least `retryAfterMs`.
 	 */
 	| { status: "slow_down"; retryAfterMs?: number }
 	| { status: "failed"; message: string };
@@ -92,21 +92,22 @@ export async function pollOAuthDeviceCodeFlow<T>(options: OAuthDeviceCodeFlowOpt
 		if (result.status === "failed") {
 			throw new AIError.OAuthError(result.message, { kind: "polling" });
 		}
+		let waitMs = intervalMs;
 		if (result.status === "slow_down") {
-			slowDownResponses += 1;
-			intervalMs = Math.max(
-				MINIMUM_DEVICE_FLOW_INTERVAL_MS,
-				result.retryAfterMs === undefined
-					? intervalMs + SLOW_DOWN_INTERVAL_INCREMENT_MS
-					: Math.max(intervalMs, result.retryAfterMs),
-			);
+			if (result.retryAfterMs === undefined) {
+				slowDownResponses += 1;
+				intervalMs = Math.max(MINIMUM_DEVICE_FLOW_INTERVAL_MS, intervalMs + SLOW_DOWN_INTERVAL_INCREMENT_MS);
+				waitMs = intervalMs;
+			} else {
+				waitMs = Math.max(intervalMs, result.retryAfterMs);
+			}
 		}
 
 		const remainingMs = deadline - Date.now();
 		if (remainingMs <= 0) {
 			break;
 		}
-		await abortableDeviceFlowSleep(Math.min(intervalMs, remainingMs), options.signal);
+		await abortableDeviceFlowSleep(Math.min(waitMs, remainingMs), options.signal);
 	}
 
 	throw new AIError.OAuthError(
