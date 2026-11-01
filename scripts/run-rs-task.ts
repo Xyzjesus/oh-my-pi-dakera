@@ -167,8 +167,27 @@ async function decideWhetherToRun(): Promise<RunDecision> {
 	const more = changed.rustPaths.length > 1 ? ` and ${changed.rustPaths.length - 1} more` : "";
 	return {
 		run: true,
-		reason: `${changed.rustPaths[0]}${more} changed since ${changed.base.slice(0, 12)}, the merge base with ${changed.trunk}.`,
+		reason: `${displayPath(changed.rustPaths[0])}${more} changed since ${changed.base.slice(0, 12)}, the merge base with ${changed.trunk}.`,
 	};
+}
+
+/**
+ * A path as shown on the one decision line. Git allows control characters in a
+ * path, and a raw newline or escape sequence would split or garble that line.
+ */
+function displayPath(changedPath: string): string {
+	let shown = "";
+	let escaped = false;
+	for (const char of changedPath) {
+		const code = char.codePointAt(0) ?? 0;
+		if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
+			shown += `\\x${code.toString(16).padStart(2, "0")}`;
+			escaped = true;
+		} else {
+			shown += char;
+		}
+	}
+	return escaped ? `"${shown}"` : shown;
 }
 
 function isEnabled(value: string | undefined): boolean {
@@ -197,7 +216,7 @@ async function collectBranchChanges(): Promise<BranchChanges> {
 	if (trunkRemotes.length === 0) {
 		return {
 			unknown: `no ${TRUNK_REMOTES.join(" or ")} remote to diff against`,
-			cure: "git remote add upstream https://github.com/can1357/oh-my-pi && git fetch upstream main",
+			cure: "git remote add upstream https://github.com/can1357/oh-my-pi && git fetch upstream main:refs/remotes/upstream/main",
 		};
 	}
 
@@ -210,7 +229,7 @@ async function collectBranchChanges(): Promise<BranchChanges> {
 	for (const remote of trunkRemotes) {
 		const trunk = `${remote}/main`;
 		const tip = await git("rev-parse", "--verify", "--quiet", `refs/remotes/${trunk}^{commit}`);
-		if (!tip.ok) return { unknown: `the ${remote} remote has no fetched main`, cure: `git fetch ${remote} main` };
+		if (!tip.ok) return await missingTrunk(remote);
 		const mergeBase = await git("merge-base", "HEAD", tip.text.trim());
 		if (!mergeBase.ok) return { unknown: `no merge base between HEAD and ${trunk}` };
 		const base = mergeBase.text.trim();
@@ -221,6 +240,26 @@ async function collectBranchChanges(): Promise<BranchChanges> {
 		trunks.push({ trunk, base, rustPaths: paths.filter(isRustAffectingPath) });
 	}
 	return { trunks };
+}
+
+/**
+ * Why a configured remote has no `main` to measure against, and the command that
+ * fixes it when there is one. The fetch names its destination because a plain
+ * `git fetch <remote> main` only writes FETCH_HEAD when the remote's refspec
+ * leaves `main` out, as a single-branch clone's does.
+ */
+async function missingTrunk(remote: string): Promise<BranchChanges> {
+	const head = await git("symbolic-ref", "--quiet", `refs/remotes/${remote}/HEAD`);
+	const defaultBranch = head.ok ? head.text.trim().slice(`refs/remotes/${remote}/`.length) : "main";
+	if (defaultBranch !== "main") {
+		return {
+			unknown: `${remote}'s default branch is ${defaultBranch}, not main, and this gate compares only against main, so it runs on every check here`,
+		};
+	}
+	return {
+		unknown: `the ${remote} remote has no fetched main`,
+		cure: `git fetch ${remote} main:refs/remotes/${remote}/main`,
+	};
 }
 
 async function git(...args: string[]): Promise<GitResult> {
@@ -264,6 +303,8 @@ function isRustAffectingPath(changedPath: string): boolean {
 		// Everything under crates/ feeds a crate: fixtures, include_bytes! data, grammars build.rs compiles.
 		normalized.startsWith("crates/") ||
 		normalized.startsWith(".cargo/") ||
+		// `test:rs` is `cargo nextest run`, which reads its filters and scheduling from here.
+		normalized === ".config/nextest.toml" ||
 		isOneOf(fileName, RUST_AFFECTING_FILE_NAMES)
 	);
 }

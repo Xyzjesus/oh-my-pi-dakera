@@ -69,11 +69,14 @@ async function commitFile(repo: string, file: string, content: string, message: 
 	await git(repo, "commit", "-q", "-m", message);
 }
 
-async function runCheckRs(
-	fixture: Fixture,
-	cwd: string,
-	env: Record<string, string> = {},
-): Promise<{ exitCode: number; output: string; cargoRan: boolean }> {
+/** What a contributor sees from one gate run. */
+interface CheckRsResult {
+	exitCode: number;
+	output: string;
+	cargoRan: boolean;
+}
+
+async function runCheckRs(fixture: Fixture, cwd: string, env: Record<string, string> = {}): Promise<CheckRsResult> {
 	const base: Record<string, string | undefined> = { ...process.env };
 	// The ambient environment must not decide the case: an omp shell exports
 	// CI=true, a GitHub runner exports GITHUB_ACTIONS, and a git hook exports GIT_DIR.
@@ -93,6 +96,22 @@ async function runCheckRs(
 	]);
 	const output = `${stdout}${stderr}`;
 	return { exitCode, output, cargoRan: output.includes("cargo-stub clippy") };
+}
+
+/**
+ * Runs the gate, and while it prints a cure, runs that command exactly as printed
+ * and runs the gate again. Returns the cures followed and the final run, so a
+ * case can assert that following the advice leads to a decision.
+ */
+async function followCures(fixture: Fixture, cwd: string): Promise<{ cures: string[]; result: CheckRsResult }> {
+	const cures: string[] = [];
+	for (;;) {
+		const result = await runCheckRs(fixture, cwd);
+		const cure = /To let it skip when no Rust changed: (.+)$/m.exec(result.output)?.[1];
+		if (cure === undefined || cures.length === 3) return { cures, result };
+		cures.push(cure);
+		await $`sh -c ${cure}`.cwd(cwd).quiet();
+	}
 }
 
 describe.skipIf(process.platform === "win32")("run-rs-task.ts check:rs", () => {
@@ -240,20 +259,109 @@ describe.skipIf(process.platform === "win32")("run-rs-task.ts check:rs", () => {
 
 	// Failure mode: a fork contributor adds `upstream` but never fetches it, and
 	// `origin/main` (their fork's main) already holds the unchecked Rust commit; a
-	// gate that falls back to `origin/main` finds nothing to check.
+	// gate that falls back to `origin/main` finds nothing to check. Or the printed
+	// cure does not make `upstream/main` appear, and the advice repeats forever.
 	test(
-		"an upstream remote with no fetched main runs the Rust gate, whatever origin/main holds",
+		"an upstream remote with no fetched main runs the Rust gate, and its printed cure lets the next run decide",
 		async () => {
 			const fixture = await makeFixture();
+			const upstream = path.join(fixture.root, "upstream.git");
+			await git(fixture.root, "clone", "-q", "--bare", fixture.origin, upstream);
 			await commitFile(fixture.origin, "crates/x/src/lib.rs", "pub fn x() -> u8 { 4 }\n", "rust on origin main");
 			await git(fixture.work, "fetch", "-q", "origin");
 			await git(fixture.work, "merge", "-q", "--ff-only", "origin/main");
-			await git(fixture.work, "remote", "add", "upstream", `file://${fixture.root}/never-fetched`);
+			await git(fixture.work, "remote", "add", "upstream", `file://${upstream}`);
+
+			const { cures, result } = await followCures(fixture, fixture.work);
+
+			expect(cures).toEqual(["git fetch upstream main:refs/remotes/upstream/main"]);
+			expect(result.cargoRan).toBe(true);
+			expect(result.output).toContain("crates/x/src/lib.rs changed since");
+			expect(result.output).toContain("upstream/main");
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: actions/checkout makes a depth-1 clone of one branch. Each
+	// printed cure must work there: `git fetch --unshallow`, then a fetch of `main`
+	// that a single-branch refspec would otherwise drop into FETCH_HEAD only.
+	test(
+		"a single-branch depth-1 clone decides after following each printed cure",
+		async () => {
+			const fixture = await makeFixture();
+			await git(fixture.origin, "switch", "-q", "-c", "feature");
+			await commitFile(fixture.origin, "packages/app/src/a.ts", "export const a = 3;\n", "ts change");
+			await git(fixture.origin, "switch", "-q", "main");
+			const clone = path.join(fixture.root, "checkout");
+			await git(
+				fixture.root,
+				"clone",
+				"-q",
+				"--depth",
+				"1",
+				"--branch",
+				"feature",
+				`file://${fixture.origin}`,
+				clone,
+			);
+
+			const { cures, result } = await followCures(fixture, clone);
+
+			expect(cures).toEqual(["git fetch --unshallow", "git fetch origin main:refs/remotes/origin/main"]);
+			expect(result.cargoRan).toBe(false);
+			expect(result.output).toContain("Skipping check:rs");
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: a repository whose trunk is not called `main` is told to fetch
+	// `main`, which fails with "couldn't find remote ref main".
+	test(
+		"a remote whose default branch is not main runs the Rust gate and prints no cure",
+		async () => {
+			const fixture = await makeFixture();
+			await git(fixture.origin, "branch", "-q", "-m", "main", "master");
+			const clone = path.join(fixture.root, "master-clone");
+			await git(fixture.root, "clone", "-q", fixture.origin, clone);
+
+			const result = await runCheckRs(fixture, clone);
+
+			expect(result.cargoRan).toBe(true);
+			expect(result.output).toContain("origin's default branch is master");
+			expect(result.output).not.toContain("To let it skip");
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: `test:rs` is `cargo nextest run`, which reads this file; a branch
+	// that breaks it alone would skip the Rust tests.
+	test(
+		"a change to .config/nextest.toml alone runs the Rust gate",
+		async () => {
+			const fixture = await makeFixture();
+			await git(fixture.work, "switch", "-q", "-c", "feature");
+			await commitFile(fixture.work, ".config/nextest.toml", "[profile.default]\n", "nextest config");
 
 			const result = await runCheckRs(fixture, fixture.work);
 
 			expect(result.cargoRan).toBe(true);
-			expect(result.output).toContain("git fetch upstream main");
+			expect(result.output).toContain(".config/nextest.toml");
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: a path with a newline in it splits the one decision line in two.
+	test(
+		"a changed path with a control character stays on one decision line",
+		async () => {
+			const fixture = await makeFixture();
+			await git(fixture.work, "switch", "-q", "-c", "feature");
+			await commitFile(fixture.work, "crates/x/src/we\nird.rs", "pub fn w() {}\n", "odd path");
+
+			const result = await runCheckRs(fixture, fixture.work);
+
+			expect(result.cargoRan).toBe(true);
+			expect(result.output).toContain('Running check:rs: "crates/x/src/we\\x0aird.rs" changed since');
 		},
 		CASE_TIMEOUT_MS,
 	);
