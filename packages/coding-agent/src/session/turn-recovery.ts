@@ -25,7 +25,7 @@ import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-cred
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
+import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong, sleepUntil } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -3118,6 +3118,9 @@ export class TurnRecovery {
 		}
 
 		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
+		// Quota resets elapse while the machine sleeps, just like the UI's
+		// wall-clock countdown. Capture the deadline before event delivery.
+		const usageResetDeadline = AIError.is(id, AIError.Flag.UsageLimit) ? Date.now() + delayMs : undefined;
 
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_start",
@@ -3144,15 +3147,17 @@ export class TurnRecovery {
 		this.#maybeInjectThinkingLoopRedirect(id);
 		this.#maybeInjectMalformedFunctionCallRedirect(id, maxRetries, preserveFailedTurn, switchedModel);
 
-		// Day-scale provider waits (a monthly quota reset parsed from the error
-		// text) exceed the signed 32-bit timer limit; sleepLong chunks the sleep
-		// so the full wait elapses instead of overflowing the timer. `delayMs`
-		// stays exact for events and the retry deadline computation.
+		// Preserve monotonic backoff for ordinary failures. Quota deadlines
+		// instead include system sleep and are rechecked with bounded timers.
 		const retryAbortController = new AbortController();
 		this.#retryAbortController?.abort();
 		this.#retryAbortController = retryAbortController;
 		try {
-			await sleepLong(delayMs, retryAbortController.signal);
+			if (usageResetDeadline !== undefined) {
+				await sleepUntil(usageResetDeadline, retryAbortController.signal);
+			} else {
+				await sleepLong(delayMs, retryAbortController.signal);
+			}
 		} catch {
 			if (this.#retryAbortController !== retryAbortController) {
 				return false;

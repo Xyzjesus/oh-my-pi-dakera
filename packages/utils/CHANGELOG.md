@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added abortable `sleepUntil` for wall-clock deadline waits that include system sleep, with bounded timer slices to recheck deadlines after resume ([#17606](https://github.com/can1357/oh-my-pi/pull/17606) by [@zhiland](https://github.com/zhiland)).
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
