@@ -172,6 +172,14 @@ describe("Rex terminal graphics", () => {
 		expect(resolveImageProtocol(detectTerminalId({ TERM_PROGRAM: "ghostty" }), {}, true)).toBe(ImageProtocol.Kitty);
 	});
 
+	it("keeps Kitty images over SSH when only TERM=xterm-rex identifies the client", () => {
+		const env = { TERM: "xterm-rex", COLORTERM: "truecolor", SSH_CONNECTION: "client 1 server 22" };
+		const id = detectTerminalId(env);
+		expect(id).toBe("rex");
+		expect(resolveImageProtocol(id, env, true)).toBe(ImageProtocol.Kitty);
+		expect(detectTerminalId({ ...env, TERM: "xterm-rex-other" })).toBe("trueColor");
+	});
+
 	it("renders Kitty APCs in a new Rex process unless an explicit override disables or replaces them", async () => {
 		for (const [override, protocol, prefix] of [
 			[undefined, ImageProtocol.Kitty, "\x1b_G"],
@@ -357,6 +365,11 @@ console.log(JSON.stringify({ id: TERMINAL_ID, notifyProtocol: TERMINAL.notifyPro
 			expect(JSON.parse(stdout)).toMatchObject({ id: "kitty", imageProtocol: ImageProtocol.Kitty });
 		},
 	);
+
+	it.skipIf(process.platform === "win32")("recognizes a Rex client from tmux client_termname", async () => {
+		const stdout = await resolveInsideFakeTmux("tmux 3.4\txterm-rex");
+		expect(JSON.parse(stdout)).toMatchObject({ id: "rex", imageProtocol: ImageProtocol.Kitty });
+	});
 });
 
 describe("synchronizedOutputUserOverride", () => {
