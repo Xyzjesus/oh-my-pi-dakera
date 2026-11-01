@@ -88,32 +88,52 @@ describe("browser prelude", () => {
 			budgets.push(opts.timeoutMs);
 			return { displays: [], returnValue: true, screenshots: [] };
 		});
-		const effectiveWait = async (parameters: Record<string, unknown>, settings?: Settings): Promise<number> => {
+		const effectiveWait = async (
+			parameters: Record<string, unknown>,
+			waitTimeout: number,
+			settings?: Settings,
+		): Promise<number> => {
 			const session = makeSession(settings);
 			await createBrowserPrelude(session).invoke(
 				{ action: "call", name: "docs", ...parameters },
 				{ session, toolCallId: "browser-call-budget" },
 			);
-			return resolveWaitTimeout(budgets.at(-1)!, 50_000);
+			return resolveWaitTimeout(budgets.at(-1)!, waitTimeout);
 		};
 		const waitChain = [{ method: "waitForSelector", args: ["#closed", { timeout: 50_000 }] }];
 
 		// Eval's `tab.waitForSelector(sel, { timeout: 50000 })` used to stop at 29000ms.
-		expect(await effectiveWait({ chain: waitChain })).toBe(50_000);
+		expect(await effectiveWait({ chain: waitChain }, 50_000)).toBe(50_000);
 		// The handle hop's trailing options drive the budget too.
 		expect(
-			await effectiveWait({
-				chain: [
-					{ method: "frame", args: ["#pay"] },
-					{ method: "waitForSelector", args: ["#closed", { timeout: 50_000 }] },
-				],
-			}),
+			await effectiveWait(
+				{
+					chain: [
+						{ method: "frame", args: ["#pay"] },
+						{ method: "waitForSelector", args: ["#closed", { timeout: 50_000 }] },
+					],
+				},
+				50_000,
+			),
 		).toBe(50_000);
 		// An explicit call `timeout` and `tools.maxTimeout` still bound the wait.
-		expect(await effectiveWait({ chain: waitChain, timeout: 10 })).toBe(9_000);
+		expect(await effectiveWait({ chain: waitChain, timeout: 10 }, 50_000)).toBe(9_000);
 		expect(
 			await effectiveWait(
 				{ chain: waitChain },
+				50_000,
+				Settings.isolated({ "browser.enabled": true, "tools.maxTimeout": 20 }),
+			),
+		).toBe(19_000);
+		// Puppeteer's disable sentinels use the largest bounded wait, not the 30s default.
+		const zeroChain = [{ method: "waitForSelector", args: ["#closed", { timeout: 0 }] }];
+		expect(await effectiveWait({ chain: zeroChain }, 0)).toBe(299_000);
+		const infiniteChain = [{ method: "waitForSelector", args: ["#closed", { timeout: Infinity }] }];
+		expect(await effectiveWait({ chain: infiniteChain }, Infinity)).toBe(299_000);
+		expect(
+			await effectiveWait(
+				{ chain: zeroChain },
+				0,
 				Settings.isolated({ "browser.enabled": true, "tools.maxTimeout": 20 }),
 			),
 		).toBe(19_000);

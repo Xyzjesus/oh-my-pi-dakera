@@ -232,15 +232,17 @@ export function renderTabCall(chain: readonly TabCallStep[]): string {
 }
 
 /**
- * Tool budget in seconds that lets a call chain's trailing `{ timeout }` (ms) run in full, or
- * `undefined` when the chain passes none. `invokeBrowser` uses it for `call` actions, which carry no
- * `timeout` of their own: wait helpers clamp `timeout` to the budget less
- * {@link CELL_BUDGET_SLACK_MS} (`resolveWaitTimeout`), so under the default budget an Eval
- * `tab.waitForSelector(sel, { timeout: 50_000 })` would stop at 29 s. Never below the tool default.
+ * Tool budget in seconds for a call chain's trailing `{ timeout }` (ms), or `undefined`
+ * when it passes none. `invokeBrowser` uses it for `call` actions, which carry no
+ * timeout of their own. Wait helpers clamp to the budget less
+ * {@link CELL_BUDGET_SLACK_MS}; disable sentinels use the browser tool's maximum
+ * bounded budget. Never below the tool default for positive finite timeouts.
  */
 export function tabCallBudgetSeconds(chain: readonly TabCallStep[] | undefined): number | undefined {
 	const options = chain?.at(-1)?.args.at(-1);
 	const timeout = isRecord(options) ? options.timeout : undefined;
-	if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) return undefined;
+	if (typeof timeout !== "number") return undefined;
+	if (timeout === 0 || timeout === Number.POSITIVE_INFINITY) return TOOL_TIMEOUTS.browser.max;
+	if (!Number.isFinite(timeout) || timeout < 0) return undefined;
 	return Math.max(TOOL_TIMEOUTS.browser.default, Math.ceil((timeout + CELL_BUDGET_SLACK_MS) / 1000));
 }
