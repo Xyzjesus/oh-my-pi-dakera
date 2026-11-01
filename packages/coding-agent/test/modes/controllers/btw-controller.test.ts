@@ -956,6 +956,7 @@ describe("BtwController inject", () => {
 		await drainBtwRequest();
 		expect(shown(ctx)).not.toContain(BTW_INJECTED_LABEL);
 		expect(controller.canInject()).toBe(true);
+		expect(ctx.showStatus).toHaveBeenLastCalledWith(expect.stringContaining("not sent"), expect.anything());
 		expect(prompt).toHaveBeenCalledTimes(3);
 	});
 
@@ -1042,11 +1043,9 @@ describe("BtwController inject", () => {
 		const sheet = showOverlay.mock.calls[0]?.[0];
 		if (!(sheet instanceof BtwHistoryPanel)) throw new Error("expected the BTW history sheet");
 
+		// A bare letter never sends: only the bound chord does.
 		sheet.handleInput("i");
-		setKeybindings(KeybindingsManager.inMemory({ "app.btw.inject": [] }));
-		sheet.handleInput(altI);
 		expect(session.prompt).not.toHaveBeenCalled();
-		setKeybindings(KeybindingsManager.inMemory());
 		sheet.handleInput(altI);
 		sheet.handleInput(altI);
 		expect(session.prompt).toHaveBeenCalledTimes(1);

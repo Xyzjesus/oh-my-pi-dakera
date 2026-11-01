@@ -9334,10 +9334,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#btwController.handleFollowUp();
 	}
 
-	canInjectBtw(): boolean {
-		return this.#btwController.canInject();
-	}
-
 	handleBtwInjectKey(): boolean {
 		return this.#btwController.handleInject();
 	}

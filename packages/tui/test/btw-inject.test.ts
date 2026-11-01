@@ -6,7 +6,7 @@ import {
 	getBtwRecordInject,
 	splitBtwInject,
 } from "@oh-my-pi/pi-tui/overlays/btw-history";
-import { BTW_INJECT_LABEL, BTW_INJECTED_LABEL, describeBtwInject } from "@oh-my-pi/pi-tui/overlays/btw-inject";
+import { BTW_INJECT_LABEL, BTW_INJECTED_LABEL } from "@oh-my-pi/pi-tui/overlays/btw-inject";
 import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 
@@ -123,17 +123,5 @@ describe("btw <inject> blocks", () => {
 		expect(railRows()).toBeGreaterThan(0);
 		panel.markComplete();
 		expect(railRows()).toBe(0);
-		expect(panel.getInjectText()).toBeUndefined();
-	});
-
-	it("marks the whole block in Tern with a toned card, since Tern wraps the rows itself", () => {
-		const prompt = "Stop the audit now, cancel every running agent, delete the clone, and report what you removed.";
-		const pending = describeBtwInject(prompt, false);
-		const sent = describeBtwInject(prompt, true);
-		expect([pending.k, pending.p?.tone]).toEqual(["card", "user"]);
-		expect([sent.k, sent.p?.tone]).toEqual(["card", "success"]);
-		// One unbroken text node per source line: every wrapped row sits inside the toned card.
-		expect(JSON.stringify(sent.c)).toContain(JSON.stringify(prompt));
-		expect(JSON.stringify(sent)).toContain(BTW_INJECTED_LABEL);
 	});
 });

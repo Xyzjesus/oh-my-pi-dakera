@@ -9,6 +9,7 @@ import {
 	getBtwLatestTurn,
 	getBtwRecordInject,
 	getBtwTurnKey,
+	getBtwTurns,
 } from "../../session/btw-history";
 import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-turn";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -96,17 +97,17 @@ export class BtwController {
 	readonly #writes = new Set<Promise<boolean>>();
 	readonly #failedWrites = new Map<BtwRequest, Error>();
 	/**
-	 * Turns answered in this process with the inject instruction (`btw.inject` eligible when
-	 * asked), keyed by `getBtwTurnKey`: only these can be injected, so history from an earlier
-	 * run, or an answer asked while injecting was off, never sends a prompt. Record ids are
-	 * unique, so these sets outlive session changes.
+	 * Inject state per answer turn (`getBtwTurnKey`). Only turns answered in this process with
+	 * the inject instruction and a closed block get an entry, so history from an earlier run, or
+	 * an answer asked while injecting was off, never sends. Record ids are unique, so entries
+	 * outlive session changes.
 	 */
-	readonly #freshTurns = new Set<string>();
-	/** Turns sent to the main session, so neither surface steers twice. */
-	readonly #injected = new Set<string>();
-	/** Turns whose send is in flight: the inject key does nothing until it lands or fails. */
-	readonly #injecting = new Set<string>();
-	/** In-flight sends by text, so a prompt the session drops comes back here instead of the editor. */
+	readonly #injects = new Map<string, "ready" | "sending" | "sent">();
+	/**
+	 * Sends awaiting dispatch, by text: a prompt the session drops comes back here instead of the
+	 * editor. An idle send keeps its entry until its turn settles, since the session reports drops
+	 * by text alone; a typed prompt identical to the block dropped meanwhile would land here.
+	 */
 	readonly #droppedInjects = new Map<string, (prompt: DroppedPrompt) => void>();
 
 	constructor(private readonly ctx: InteractiveModeContext) {}
@@ -147,7 +148,7 @@ export class BtwController {
 
 	#branchUnavailableReason(): string | undefined {
 		if (this.#branchInFlight) return "a branch is already in progress";
-		if (this.#injecting.size > 0) return "a /btw prompt is still sending";
+		if ([...this.#injects.values()].includes("sending")) return "a /btw prompt is still sending";
 		if (this.#transitionCount > 0) return "a session operation is in progress";
 		if (!this.#visible || this.#activeRequest?.component.isBranchable() !== true) return "the answer is not ready";
 		if (this.#activeRequest.session !== this.ctx.session || this.ctx.focusedAgentId)
@@ -263,12 +264,7 @@ export class BtwController {
 
 	canInject(): boolean {
 		const request = this.#activeRequest;
-		return (
-			this.#visible &&
-			request !== undefined &&
-			this.#isActiveRequest(request) &&
-			this.#canInjectRecord(request.record, request.injectEnabled)
-		);
+		return this.#visible && request !== undefined && this.#isActiveRequest(request) && this.#canSend(request.record);
 	}
 
 	handleInject(): boolean {
@@ -279,46 +275,35 @@ export class BtwController {
 	}
 
 	/**
-	 * Whether side answers about `session` may steer the main session: `btw.inject` is on, the
-	 * main session is in view, and this host runs its turns (not a collab guest). Read once per
-	 * surface (inline answer, history sheet) and kept, so one value gates the prompt
-	 * instruction, the highlighted block, and the inject key for that surface.
+	 * Whether side answers asked now may steer the main session: `btw.inject` is on, the main
+	 * session is in view, and this host runs its turns (not a collab guest). Read once per
+	 * surface (inline answer, history sheet), so one value gates the prompt instruction, the
+	 * highlighted block, and the inject key there.
 	 */
-	#injectEnabled(session: InteractiveModeContext["session"]): boolean {
-		return (
-			cfgBtwInject.get(this.ctx.settings) &&
-			session === this.ctx.session &&
-			!this.ctx.focusedAgentId &&
-			!this.ctx.collabGuest
-		);
+	#injectEnabled(): boolean {
+		return cfgBtwInject.get(this.ctx.settings) && !this.ctx.focusedAgentId && !this.ctx.collabGuest;
 	}
 
-	#canInjectRecord(record: BtwHistoryRecord, enabled: boolean): boolean {
-		const key = getBtwTurnKey(record);
+	/** The topic's latest answer is ready to send, and no branch or session move would race the new main-session turn. */
+	#canSend(record: BtwHistoryRecord): boolean {
 		return (
-			enabled &&
-			// Follow-ups' lifecycle gates: a new main-session turn must not race a branch or session move.
 			!this.#starting &&
 			!this.#branchInFlight &&
 			this.#transitionCount === 0 &&
-			this.#freshTurns.has(key) &&
-			!this.#injected.has(key) &&
-			!this.#injecting.has(key) &&
-			getBtwRecordInject(record) !== undefined
+			this.#injects.get(getBtwTurnKey(record)) === "ready"
 		);
 	}
 
-	/** How a turn's `<inject>` block shows in history: sent, still sendable (the latest fresh turn), or plain text. */
+	/** How a turn's `<inject>` block shows in history: sent, pending on the latest turn, or plain text. */
 	#injectState(record: BtwHistoryRecord, turnIndex: number): BtwInjectState | undefined {
-		const key = getBtwTurnKey(record, turnIndex);
-		if (this.#injected.has(key)) return "sent";
-		return turnIndex === (record.followUps?.length ?? 0) && this.#freshTurns.has(key) ? "pending" : undefined;
+		const state = this.#injects.get(getBtwTurnKey(record, turnIndex));
+		if (state === "sent") return "sent";
+		return state && turnIndex === getBtwTurns(record).length - 1 ? "pending" : undefined;
 	}
 
 	/**
 	 * A prompt the session dropped before dispatch: if it is an inject in flight, take it back so
-	 * the inject key stays its one retry path (putting it in the editor too would offer a second
-	 * way to send it). Returns whether it was an inject.
+	 * the inject key stays its one retry path. Returns whether it was an inject.
 	 */
 	reclaimDroppedPrompt(prompt: DroppedPrompt): boolean {
 		const reclaim = this.#droppedInjects.get(prompt.text);
@@ -331,29 +316,30 @@ export class BtwController {
 	/**
 	 * Send the topic's steering prompt to the main session as a user message: a steer while the
 	 * agent runs, else a new turn. Slash commands and templates are not expanded, so model-written
-	 * text never runs as a command. The turn counts as sent once the prompt is admitted. The key is
-	 * the one way to retry: a prompt the session drops before dispatch comes back through
-	 * {@link reclaimDroppedPrompt} instead of the editor, and one refused before it reached the
-	 * transcript (no model or API key) rolls back the same way. A failure after the message reached
-	 * the transcript or the steer queue keeps it marked sent, so it can never be sent twice.
+	 * text never runs as a command. The turn counts as sent once admitted. A send dropped or refused
+	 * before it reached the transcript or the steer queue turns back to ready, with the inject key
+	 * as its one retry path; a later failure keeps it sent, so it is never sent twice.
 	 */
 	#inject(record: BtwHistoryRecord): void {
 		const text = getBtwRecordInject(record);
 		if (!text) return;
 		const key = getBtwTurnKey(record);
 		const session = this.ctx.session;
-		const settle = (sent: boolean): void => {
-			this.#injecting.delete(key);
-			if (sent) this.#injected.add(key);
-			else this.#injected.delete(key);
+		const settle = (sent: boolean, reason?: string): void => {
+			this.#injects.set(key, sent ? "sent" : "ready");
 			// Only the turn that was sent: a follow-up may have taken the panel while the send waited.
 			const request = this.#activeRequest;
 			if (request && getBtwTurnKey(request.record) === key) request.component.setInjected(sent);
 			this.#refreshHistory();
-		};
-		const fail = (error: unknown): void => {
-			settle(false);
-			this.ctx.showError(sanitizeErrorLine(`Cannot inject /btw prompt: ${toError(error).message}`));
+			if (sent) return;
+			if (reason) {
+				this.ctx.showError(sanitizeErrorLine(`Cannot inject /btw prompt: ${reason}`));
+				return;
+			}
+			const retry = appKey(this.ctx.keybindings, "app.btw.inject");
+			this.ctx.showStatus(retry ? `/btw prompt not sent · ${retry} to retry` : "/btw prompt not sent", {
+				dim: true,
+			});
 		};
 		const send = (): void => {
 			let admitted = false;
@@ -363,15 +349,7 @@ export class BtwController {
 			const userBefore = lastUserMessage();
 			const reclaim = (prompt: DroppedPrompt): void => {
 				reclaimed = true;
-				settle(false);
-				if (prompt.reason) {
-					this.ctx.showError(sanitizeErrorLine(`Cannot inject /btw prompt: ${prompt.reason}`));
-					return;
-				}
-				const retry = appKey(this.ctx.keybindings, "app.btw.inject");
-				this.ctx.showStatus(retry ? `/btw prompt not sent · ${retry} to retry` : "/btw prompt not sent", {
-					dim: true,
-				});
+				settle(false, prompt.reason);
 			};
 			this.#droppedInjects.set(text, reclaim);
 			session
@@ -388,27 +366,23 @@ export class BtwController {
 					},
 				})
 				.then(
-					// Some drops resolve instead of rejecting; without an admission nothing was sent.
+					// A drop while queueing resolves without admission: nothing was sent.
 					() => {
 						if (!admitted && !reclaimed) settle(false);
 					},
 					(error: unknown) => {
 						if (reclaimed) return;
-						if (queued || lastUserMessage() !== userBefore) {
-							// Already in the transcript or the steer queue: it was sent, so keep the mark.
-							this.#injecting.delete(key);
-							this.#refreshHistory();
-							this.ctx.showError(sanitizeErrorLine(toError(error).message));
-							return;
-						}
-						fail(error);
+						const message = toError(error).message;
+						// Already in the steer queue or the transcript: it was sent, so keep the mark.
+						if (queued || lastUserMessage() !== userBefore) this.ctx.showError(sanitizeErrorLine(message));
+						else settle(false, message);
 					},
 				)
 				.finally(() => {
 					if (this.#droppedInjects.get(text) === reclaim) this.#droppedInjects.delete(text);
 				});
 		};
-		this.#injecting.add(key);
+		this.#injects.set(key, "sending");
 		if (!session.hasPendingDeferredExtensions) {
 			send();
 			return;
@@ -418,10 +392,13 @@ export class BtwController {
 		// here instead and drop the send if the session moved on (dispose bumps the generation).
 		const generation = this.#generation;
 		const sessionId = this.ctx.sessionManager.getSessionId();
-		session.loadDeferredExtensions().then(() => {
-			if (generation === this.#generation && sessionId === this.ctx.sessionManager.getSessionId()) send();
-			else settle(false);
-		}, fail);
+		session.loadDeferredExtensions().then(
+			() => {
+				if (generation === this.#generation && sessionId === this.ctx.sessionManager.getSessionId()) send();
+				else settle(false);
+			},
+			(error: unknown) => settle(false, toError(error).message),
+		);
 	}
 
 	handleCancel(): boolean {
@@ -632,7 +609,7 @@ export class BtwController {
 			this.#clearCompletedState();
 			const leafId = this.#sessionManager.getLeafId();
 			const { record, history, conversationKey } = beginBtwTurn(trimmedQuestion, leafId, previous, images, title);
-			const injectEnabled = this.#injectEnabled(viewSession);
+			const injectEnabled = this.#injectEnabled();
 			const request: BtwRequest = {
 				component: new BtwPanelComponent({
 					question: trimmedQuestion,
@@ -734,15 +711,13 @@ export class BtwController {
 			spaceHoldKeys: this.ctx.keybindings.getKeys("app.stt.pushToTalk"),
 			spaceHold: input => this.ctx.dictationSpaceHold(input),
 			requestRender: () => this.ctx.ui.requestRender(),
-			...(this.#injectEnabled(this.ctx.focusedAgentId ? this.ctx.viewSession : this.ctx.session)
+			inject: this.#injectEnabled()
 				? {
-						canInject: (record: BtwHistoryRecord) => this.#canInjectRecord(record, true),
-						onInject: (record: BtwHistoryRecord) => {
-							if (this.#canInjectRecord(record, true)) this.#inject(record);
-						},
-						injectState: (record: BtwHistoryRecord, turnIndex: number) => this.#injectState(record, turnIndex),
+						state: (record, turnIndex) => this.#injectState(record, turnIndex),
+						canSend: record => this.#canSend(record),
+						send: record => this.#inject(record),
 					}
-				: {}),
+				: undefined,
 			getHeight: () => this.ctx.ui.terminal.rows,
 			// Tern has no inline panel: Esc puts the sheet away, `x` cancels.
 			escapeHides: this.ctx.ui.nativeRendering,
@@ -847,7 +822,9 @@ export class BtwController {
 			if (getBtwLatestTurn(request.record).status !== "running") return;
 			this.#updateRequest(request, { answer: replyText, status: "complete", updatedAt: Date.now() });
 			// Only an answer asked with the inject instruction can be sent, even if the setting is turned on later.
-			if (request.injectEnabled) this.#freshTurns.add(getBtwTurnKey(request.record));
+			if (request.injectEnabled && getBtwRecordInject(request.record) !== undefined) {
+				this.#injects.set(getBtwTurnKey(request.record), "ready");
+			}
 			if (this.#isActiveRequest(request)) {
 				request.component.setAnswer(replyText);
 				request.component.markComplete();
