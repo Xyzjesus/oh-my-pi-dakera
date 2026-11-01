@@ -1656,11 +1656,7 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 	return commands;
 }
 
-/**
- * `AgentTool` keys a capture turn advertises unchanged: everything that shapes the request's tool list. A capture
- * request whose tools differ from the primary turn's diverges from it at the top of the prompt, so every provider
- * prompt cache (and every local server's prefix cache) misses on the whole conversation.
- */
+/** `AgentTool` keys that shape the request's tool list; a capture turn copies them so it keeps the primary's cache prefix. */
 const CAPTURE_ADVERTISED_KEYS = [
 	"name",
 	"description",
@@ -1743,21 +1739,14 @@ export interface AutoLearnCaptureRunnerOptions {
 	/** Resolves the capture tools per run, so live `autolearn.enabled` / backend changes apply. */
 	captureTools: () => AgentTool[];
 	createAgent: (options: AgentOptions) => Agent;
-	/**
-	 * The cache key the primary loop sends for `model` (explicit, or the model-gated Task family key); undefined falls
-	 * back to the source agent's explicit key, then its provider session id, as providers route on
-	 * `promptCacheKey ?? sessionId`.
-	 */
+	/** The cache key the primary loop sends for `model`; falls back to the source agent's key, then its session id. */
 	primaryPromptCacheKey?: (model: Model) => string | undefined;
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
 	createSessionId?: () => string;
 }
 
-/**
- * A tool the host runs itself, never dispatching the call to the client: a refused copy could not stop it. `model`
- * carries its resolved headers, which can switch a host tool on.
- */
+/** A tool the provider runs itself (a refused copy could not stop it); resolved headers can switch one on. */
 function hostRunsTool(model: Model, name: string): boolean {
 	return model.api === "anthropic-messages" && anthropicHostRunsTool(model as Model<"anthropic-messages">, name);
 }
@@ -1783,8 +1772,7 @@ export function createAutoLearnCaptureRunner(
 			options.primaryPromptCacheKey?.(sourceModel) ??
 			options.sourceAgent.promptCacheKey ??
 			options.sourceAgent.sessionId;
-		// Configured headers live behind `resolveHeaders`. Resolve them once, as `streamSimple` would, and send the
-		// request with them: the tool list and the request must agree on which tools the host runs.
+		// Resolve headers once so the tool list and the request agree on which tools the host runs.
 		const captureModel: Model = sourceModel.resolveHeaders
 			? { ...sourceModel, resolveHeaders: undefined, headers: { ...(await sourceModel.resolveHeaders(signal)) } }
 			: sourceModel;
@@ -1835,11 +1823,9 @@ export function createAutoLearnCaptureRunner(
 				messages: captureMessages,
 			},
 			sessionId: captureSessionId,
-			// The key the primary loop sent, so a provider that routes by it (OpenAI `prompt_cache_key`) serves the
-			// capture from the primary prompt's cache. The provider session id above stays the capture's own (#10869).
+			// The primary's cache key; the provider session id stays the capture's own (#10869).
 			promptCacheKey: capturePromptCacheKey,
-			// The replayed history's `requestControls` declare tools the primary withdrew (Anthropic `tool_removal`);
-			// their sent definitions keep that declaration byte-identical. A host-run tool is never declared again.
+			// Withdrawn tools the replayed history declares keep their sent definitions; host-run ones are dropped.
 			sentToolDefinitions: sourceSentToolDefinitions.copy(name => !hostRuns(name)),
 			providerSessionState: captureProviderSessionState,
 			getApiKey: requestModel => options.sourceAgent.getApiKey?.(requestModel),
@@ -5693,15 +5679,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
 					streamFn: primaryStreamFn,
 					transformToolCallArguments,
-					// No fallback resolver. The capture agent advertises the primary's
-					// tool list (so the request keeps the primary prompt's cache), but
-					// only `learn`/`manage_skill` execute: every other tool is a refused
-					// copy that runs nothing (`captureToolList`). Both capture tools stay
-					// top-level and never mount as devices, so there is nothing legitimate
-					// to recover — while the primary session's resolver is bound to the
-					// primary agent's tools and would let a capture response reach a
-					// main-session MCP tool, side effects included. A hallucinated call
-					// from here correctly stays `not found`.
+					// No fallback resolver: only `learn`/`manage_skill` execute here (the rest are refused
+					// copies), and the primary's resolver could reach main-session MCP tools.
 					intentTracing: agent.intentTracing,
 					pruneToolDescriptions: agent.pruneToolDescriptions,
 					dialect: resolveDialect(cfgToolsFormat.get(settings), captureModel),
