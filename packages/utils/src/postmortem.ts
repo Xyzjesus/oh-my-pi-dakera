@@ -556,13 +556,47 @@ export function isExpectedCleanupError(reason: unknown): boolean {
 /** Interceptors consulted by the global `unhandledRejection` handler before the fatal path. */
 const rejectionInterceptors = new Set<(reason: unknown) => boolean>();
 
+function interceptRejection(reason: unknown): boolean {
+	for (const interceptor of rejectionInterceptors) {
+		try {
+			if (interceptor(reason)) return true;
+		} catch (interceptorErr) {
+			logger.warn("Unhandled-rejection interceptor threw; continuing with fatal path", { err: interceptorErr });
+		}
+	}
+	return false;
+}
+
+/**
+ * Without the CLI's handlers (SDK embedding), interceptors still need a listener. It exists only while
+ * interceptors do, and rethrows what none consumes unless the host listens too, keeping Bun's default.
+ */
+let embeddedRejectionListener: ((reason: unknown) => void) | undefined;
+
 /**
  * Register an interceptor consulted before an unhandled rejection tears the
  * process down. A consuming interceptor owns reporting and keeps the process alive.
  */
 export function interceptUnhandledRejections(interceptor: (reason: unknown) => boolean): () => void {
 	rejectionInterceptors.add(interceptor);
-	return () => rejectionInterceptors.delete(interceptor);
+	if (!processHandlersInstalled && Bun.isMainThread && !embeddedRejectionListener) {
+		const listener = (reason: unknown) => {
+			if (interceptRejection(reason) || process.listenerCount("unhandledRejection") > 1) return;
+			throw reason;
+		};
+		embeddedRejectionListener = listener;
+		process.on("unhandledRejection", listener);
+	}
+	return () => {
+		rejectionInterceptors.delete(interceptor);
+		if (rejectionInterceptors.size === 0) removeEmbeddedRejectionListener();
+	};
+}
+
+function removeEmbeddedRejectionListener(): void {
+	if (!embeddedRejectionListener) return;
+	process.off("unhandledRejection", embeddedRejectionListener);
+	embeddedRejectionListener = undefined;
 }
 
 /**
@@ -689,6 +723,7 @@ let processHandlersInstalled = false;
 export function installProcessHandlers(): void {
 	if (processHandlersInstalled) return;
 	processHandlersInstalled = true;
+	removeEmbeddedRejectionListener();
 	if (!Bun.isMainThread) {
 		// Workers only run synchronous cleanup on exit; their own error listeners report failures to the parent.
 		process.on("exit", () => {
@@ -756,15 +791,7 @@ export function installProcessHandlers(): void {
 				logger.warn("Ignoring expected cleanup rejection", { err });
 				return;
 			}
-			for (const interceptor of rejectionInterceptors) {
-				try {
-					if (interceptor(reason)) return;
-				} catch (interceptorErr) {
-					logger.warn("Unhandled-rejection interceptor threw; continuing with fatal path", {
-						err: interceptorErr,
-					});
-				}
-			}
+			if (interceptRejection(reason)) return;
 			await exitAfterFatal(
 				formatFatalError("Unhandled Rejection", err),
 				"Unhandled rejection",
