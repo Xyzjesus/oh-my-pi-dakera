@@ -2954,21 +2954,47 @@ describe("lsp regressions", () => {
 			}
 		});
 
-		it("prefers tsc --lsp for a native tsc outside any npm layout", async () => {
-			// #17659: nixpkgs ships TypeScript 7 as a static `bin/tsc` with no package.json.
+		it("prefers tsc --lsp for a TypeScript 7 install outside any npm layout", async () => {
+			// #17659: nixpkgs ships TypeScript 7 without a package.json.
+			if (process.platform === "win32") return;
 			const tempDir = TempDir.createSync("@omp-lsp-ts7-native-");
-			const tsc = path.join(tempDir.path(), "store", "typescript-7.0.2", "bin", "tsc");
-			await Bun.write(tsc, new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]));
+			const tsc = tempDir.join("store", "typescript-7.0.2", "bin", "tsc");
+			await Bun.write(tsc, "#!/bin/sh\nprintf 'Version 7.0.2\\n'\n");
 			await fs.promises.chmod(tsc, 0o755);
 			const project = tempDir.join("project");
 			await Bun.write(path.join(project, "tsconfig.json"), "{}");
-			vi.spyOn(Bun, "which").mockImplementation(command => (command === "tsc" ? tsc : null));
+			const originalPath = process.env.PATH;
+			process.env.PATH = `${path.dirname(tsc)}${path.delimiter}${originalPath ?? ""}`;
 			try {
 				const config = loadConfig(project);
 				expect(Object.keys(config.servers)).toEqual(["typescript-native"]);
 				expect(config.servers["typescript-native"]?.resolvedCommand).toBe(tsc);
 			} finally {
-				vi.restoreAllMocks();
+				if (originalPath === undefined) delete process.env.PATH;
+				else process.env.PATH = originalPath;
+				tempDir.removeSync();
+			}
+		});
+
+		it("does not select TypeScript 7 merely because a PATH tsc is native", async () => {
+			if (process.platform === "win32") return;
+			const tempDir = TempDir.createSync("@omp-lsp-ts-native-shim-");
+			const tsc = tempDir.join("shims", "tsc");
+			await fs.promises.mkdir(path.dirname(tsc), { recursive: true });
+			await fs.promises.symlink(process.execPath, tsc);
+			const project = tempDir.join("project");
+			await Bun.write(path.join(project, "tsconfig.json"), "{}");
+			const languageServer = tempDir.join("shims", "typescript-language-server");
+			await Bun.write(languageServer, "");
+			await fs.promises.chmod(languageServer, 0o755);
+			const originalPath = process.env.PATH;
+			process.env.PATH = `${path.dirname(tsc)}${path.delimiter}${originalPath ?? ""}`;
+			try {
+				const config = loadConfig(project);
+				expect(Object.keys(config.servers)).toEqual(["typescript-language-server"]);
+			} finally {
+				if (originalPath === undefined) delete process.env.PATH;
+				else process.env.PATH = originalPath;
 				tempDir.removeSync();
 			}
 		});

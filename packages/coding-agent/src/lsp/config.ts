@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { $which, isNativeExecutableSync, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import type { ClaudePluginRoot } from "../discovery/helpers";
 import {
@@ -338,26 +338,38 @@ function typescriptPackageDir(tscPath: string): string | null {
 /**
  * Whether the `tsc` at `tscPath` speaks LSP itself. TypeScript 7 dropped the JS
  * `lib/tsserver.js` that typescript-language-server wraps and exposes
- * `tsc --lsp --stdio` from its native binary instead; older releases reject the
- * flag with TS5023. Every pre-7 `tsc` is a Node script, so a native executable
- * outside an npm layout (e.g. nixpkgs' static `bin/tsc`) is TypeScript 7+.
+ * `tsc --lsp --stdio` instead; older releases reject the flag with TS5023.
+ * Outside an npm layout, the compiler's reported version also handles native
+ * shims that dispatch to older TypeScript installations.
  */
-function typescriptSpeaksLsp(tscPath: string): boolean {
+function typescriptSpeaksLsp(tscPath: string, cwd: string): boolean {
 	const packageDir = typescriptPackageDir(tscPath);
-	if (packageDir === null) return isNativeExecutableSync(tscPath);
-	return !fs.existsSync(path.join(packageDir, "lib", "tsserver.js"));
+	if (packageDir !== null) return !fs.existsSync(path.join(packageDir, "lib", "tsserver.js"));
+	try {
+		const result = Bun.spawnSync([tscPath, "--version"], {
+			cwd,
+			stdout: "pipe",
+			stderr: "ignore",
+			timeout: 3_000,
+			maxBuffer: 4096,
+		});
+		if (result.exitCode !== 0) return false;
+		const match = /^Version (\d+)\./.exec(result.stdout.toString().trim());
+		return match !== null && Number(match[1]) >= 7;
+	} catch {
+		return false;
+	}
 }
 
 /**
  * Keep exactly one TypeScript server. `typescript-language-server` needs
  * `lib/tsserver.js`, which a TypeScript 7 workspace no longer ships, so it fails
- * at initialize there; `tsc --lsp` exits on older TypeScript. Pick by inspecting
- * the resolved `tsc` install rather than spawning both.
+ * at initialize there; `tsc --lsp` exits on older TypeScript.
  */
-function selectTypescriptServer(servers: Record<string, ServerConfig>): void {
+function selectTypescriptServer(servers: Record<string, ServerConfig>, cwd: string): void {
 	const native = servers["typescript-native"];
 	if (!native?.resolvedCommand) return;
-	if (typescriptSpeaksLsp(native.resolvedCommand)) {
+	if (typescriptSpeaksLsp(native.resolvedCommand, cwd)) {
 		delete servers["typescript-language-server"];
 	} else {
 		delete servers["typescript-native"];
@@ -461,7 +473,7 @@ export function loadConfig(cwd: string): LspConfig {
 		if (!resolved) continue;
 		servers[name] = { ...config, resolvedCommand: resolved };
 	}
-	selectTypescriptServer(servers);
+	selectTypescriptServer(servers, cwd);
 
 	return { servers, idleTimeoutMs };
 }
