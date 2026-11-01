@@ -3363,6 +3363,20 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Asks for the captions of the running commands in this agent's job tree
+	 * (see {@link getAsyncJobTree}), for a listing that prints them (`/jobs full`).
+	 */
+	requestJobCaptions(): void {
+		const manager = this.#asyncJobManager;
+		const widgets = manager?.widgets;
+		if (!manager || !widgets) return;
+		const parents = this.#jobTreeParents();
+		for (const job of manager.getRunningJobs()) {
+			if (this.#inJobTree(job, parents)) widgets.requestCaption(job);
+		}
+	}
+
+	/**
 	 * Inspect one async job in this agent's tree (see {@link getAsyncJobTree}):
 	 * its command, live pids, exit status and output. Undefined when the job is
 	 * unknown, owned outside the tree, or evicted.

@@ -118,28 +118,45 @@ export class JobWidgets implements JobWidgetRegistry {
 			this.#syncTimer();
 			return undefined;
 		}
-		let entry = this.#entries.get(job.id);
-		if (!entry || entry.job !== job) {
-			entry?.request?.abort();
-			const runtime = new JobWidgetRuntime(undefined, job.startTime, this.#now);
-			entry = {
-				job,
-				runtime,
-				view: runtime.view({ label: job.intent ?? job.label, authoring: false }),
-				viewKey: "",
-				lastIngestAt: Number.NEGATIVE_INFINITY,
-				shown: false,
-				frozen: false,
-				attempts: 0,
-				authorUnavailable: false,
-				specHadWatch: false,
-			};
-			this.#entries.set(job.id, entry);
-		}
+		const entry = this.#entry(job);
 		entry.shown = true;
 		this.#refresh(entry, false);
 		this.#syncTimer();
 		return entry.view;
+	}
+
+	requestCaption(job: AsyncJob): void {
+		if (this.#disposed || !job.widgetInputs || job.status !== "running" || !this.#enabled()) return;
+		let brief: JobWidgetBrief;
+		try {
+			brief = job.widgetInputs.brief();
+		} catch (error) {
+			logger.warn("Job caption brief failed", { jobId: job.id, error: String(error) });
+			return;
+		}
+		this.#maybeCaption(this.#entry(job), brief, this.#now());
+	}
+
+	/** The job's entry, made fresh for a job not seen before or a new job reusing its id. */
+	#entry(job: AsyncJob): WidgetEntry {
+		const existing = this.#entries.get(job.id);
+		if (existing?.job === job) return existing;
+		existing?.request?.abort();
+		const runtime = new JobWidgetRuntime(undefined, job.startTime, this.#now);
+		const entry: WidgetEntry = {
+			job,
+			runtime,
+			view: runtime.view({ label: job.intent ?? job.label, authoring: false }),
+			viewKey: "",
+			lastIngestAt: Number.NEGATIVE_INFINITY,
+			shown: false,
+			frozen: false,
+			attempts: 0,
+			authorUnavailable: false,
+			specHadWatch: false,
+		};
+		this.#entries.set(job.id, entry);
+		return entry;
 	}
 
 	caption(job: AsyncJob): string | undefined {

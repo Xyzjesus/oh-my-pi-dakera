@@ -854,6 +854,7 @@ export class CommandController {
 	 */
 	async handleJobsCommand(options?: { full?: boolean }): Promise<void> {
 		const full = options?.full === true;
+		if (full) this.ctx.viewSession.requestJobCaptions();
 		const tree = this.ctx.viewSession.getAsyncJobTree();
 		if (!tree) {
 			this.ctx.showWarning("Async background jobs are unavailable in this session.");
