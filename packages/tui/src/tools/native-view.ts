@@ -28,14 +28,7 @@ export function fileHref(filePath: string | undefined): string | undefined {
 	return filePath && path.isAbsolute(filePath) ? tryFileUri(filePath) : undefined;
 }
 
-/**
- * Link for a head target that is a web URL, else undefined.
- *
- * A `read` of a URL lands on the read card, whose path target is not a file:
- * `fileHref` leaves it unlinked, so the URL a user is most likely to want to
- * open showed as dead text in a Tern tool row. `www.` gains its scheme, since
- * a linker needs an absolute one.
- */
+/** Link for a head target that is a web URL (`www.` gains `https://`), else undefined. */
 export function urlHref(target: string | undefined): string | undefined {
 	if (!target) return undefined;
 	const candidate = /^www\./i.test(target) ? `https://${target}` : target;
