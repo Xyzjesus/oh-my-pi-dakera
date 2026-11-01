@@ -53,11 +53,13 @@ function validator<T>(schema: Type, label: string): Validator<T> {
 const Modes = type({
 	currentModeId: "string",
 	availableModes: type({ id: "string", name: "string" }).array(),
-}).or("null");
+}).or("null | undefined");
 
-const sessionResponseFields = { "modes?": Modes, "configOptions?": "unknown[] | null" } as const;
-const SessionResponse = type(sessionResponseFields);
-const IdentifiedSessionResponse = type({ sessionId: "string", ...sessionResponseFields });
+// Responses and notifications are also checked in-process, where absent optionals may be explicit `undefined`.
+const sessionResponseFields = { "modes?": Modes, "configOptions?": "unknown[] | null | undefined" } as const;
+const notArray = (value: object): boolean => !Array.isArray(value);
+const SessionResponse = type(sessionResponseFields).narrow(notArray);
+const IdentifiedSessionResponse = type({ sessionId: "string", ...sessionResponseFields }).narrow(notArray);
 
 const ContentBlock = type({ type: "'text'", text: "string" })
 	.or({ type: "'image' | 'audio'", data: "string", mimeType: "string" })
@@ -74,7 +76,7 @@ const SessionUpdate = type({
 	.or({ sessionUpdate: "'current_mode_update'", currentModeId: "string" })
 	.or({ sessionUpdate: "'available_commands_update'", availableCommands: "unknown[]" })
 	.or({ sessionUpdate: "'config_option_update'", configOptions: "unknown[]" })
-	.or({ sessionUpdate: "'session_info_update'", "title?": "string | null" })
+	.or({ sessionUpdate: "'session_info_update'", "title?": "string | null | undefined" })
 	.or({ sessionUpdate: "'usage_update'", size: "number", used: "number" });
 
 /** Validator for new-session responses. */
@@ -90,7 +92,7 @@ export const zPromptResponse = validator<PromptResponse>(
 );
 /** Validator for session notifications. */
 export const zSessionNotification = validator<SessionNotification>(
-	type({ sessionId: "string", update: SessionUpdate }),
+	type({ sessionId: "string", update: SessionUpdate }).narrow(notArray),
 	"session notification",
 );
 

@@ -2,9 +2,10 @@ import { type } from "@oh-my-pi/omptype";
 import type { EffectiveTokenCost, ModelCost, TimeBasedCost, TokenCost } from "./types";
 import { isRecord } from "./utils";
 
+// Schedules are also checked on in-memory discovery output, where absent optionals may be explicit `undefined`.
 const Rate = type("number >= 0");
 const Rates = type({ input: Rate, output: Rate, cacheRead: Rate, cacheWrite: Rate });
-const LongContext = Rates.and({ inputThreshold: "number > 0", "inputThresholdInclusive?": "boolean" });
+const LongContext = Rates.and({ inputThreshold: "number > 0", "inputThresholdInclusive?": "boolean | undefined" });
 const PeakWindow = type({
 	weekdays: type("0 <= number.integer <= 6").array().atLeastLength(1),
 	startMinute: "number.integer >= 0",
@@ -13,13 +14,13 @@ const PeakWindow = type({
 const EffectiveRate = Rates.and({
 	// The `Date` range.
 	effectiveFrom: "-8640000000000000 <= number.integer <= 8640000000000000",
-	"longContext?": LongContext,
+	"longContext?": LongContext.or("undefined"),
 });
 /** Serialized time-based pricing schedule, as cached model rows carry it. */
 export const TimeBasedCostShape = type({
 	offPeakMultiplier: Rate,
 	peakWindows: PeakWindow.array(),
-	"effectiveRates?": EffectiveRate.array(),
+	"effectiveRates?": EffectiveRate.array().or("undefined"),
 }).narrow(
 	cost =>
 		cost.effectiveRates === undefined ||

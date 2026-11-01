@@ -156,6 +156,11 @@ const CookieObject = type({
 function parseCookieObject(value: unknown): BrowserCookieInput {
 	const cookie = CookieObject(value);
 	if (cookie instanceof type.errors) throw new ToolError(COOKIE_PARSE_ERROR);
+	// The result is a fresh object. An absent field must not shadow the scope merged in after it (`{ ...scope, ...cookie }`).
+	const fields: Record<string, unknown> = cookie;
+	for (const key in fields) {
+		if (fields[key] === undefined) delete fields[key];
+	}
 	return cookie;
 }
 
