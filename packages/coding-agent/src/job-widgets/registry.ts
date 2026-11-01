@@ -142,8 +142,11 @@ export class JobWidgets implements JobWidgetRegistry {
 	scheduleCaption(job: AsyncJob): void {
 		const command = job.process?.command;
 		if (this.#disposed || !this.#captioner || !command || !needsJobCaption(command)) return;
+		this.#cancelCaption(job.id);
 		const request = new AbortController();
-		const timer = setTimeout(() => void this.#writeCaption(job, command, request), this.#options.authorAfterMs);
+		// A foreground job promoted to the background may already be past the delay.
+		const delay = Math.max(0, job.startTime + this.#options.authorAfterMs - this.#now());
+		const timer = setTimeout(() => void this.#writeCaption(job, command, request), delay);
 		timer.unref();
 		this.#captions.set(job.id, { timer, request });
 	}

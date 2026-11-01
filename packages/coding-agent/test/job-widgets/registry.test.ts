@@ -291,7 +291,7 @@ describe("job widget registry", () => {
 		unsubscribe();
 	});
 
-	it("captions a command that needs explaining once it has run a while, unviewed; never a glanceable or finished one", async () => {
+	it("captions a background command that needs explaining once it has run a while, unviewed; never a glanceable, finished or foreground one", async () => {
 		const manager = new AsyncJobManager({});
 		managers.push(manager);
 		const calls: [string, string | undefined][] = [];
@@ -302,12 +302,13 @@ describe("job widget registry", () => {
 				return "Checks worker every 60s until the indexer stops";
 			},
 		});
-		const captioned = Promise.withResolvers<void>();
-		manager.widgets.subscribe(() => captioned.resolve());
-		const start = (command: string, intent?: string) => {
+		let notified = Promise.withResolvers<void>();
+		manager.widgets.subscribe(() => notified.resolve());
+		const start = (command: string, intent?: string, foreground?: boolean) => {
 			const done = Promise.withResolvers<string>();
 			const id = manager.register("bash", command, () => done.promise, {
 				intent,
+				foreground,
 				process: { command, cwd: "/work", pids: () => [] },
 			});
 			return { job: manager.getJob(id) as AsyncJob, finish: () => done.resolve("ok") };
@@ -315,13 +316,21 @@ describe("job widget registry", () => {
 		// Registered first so its delay runs out first: finished by then, it is never captioned.
 		start("for i in $(seq 40); do sleep 3; done").finish();
 		const short = start("bun test 2>&1").job;
+		const held = start("while ! test -f ready; do sleep 1; done; cat ready", undefined, true);
 		const watch = start("while ssh worker 'systemctl is-active indexer'; do sleep 60; done", "Wait for the indexer");
 
-		await captioned.promise;
+		await notified.promise;
 		expect(calls).toEqual([[watch.job.label, "Wait for the indexer"]]);
 		expect(watch.job.caption).toBe("Checks worker every 60s until the indexer stops");
 		expect(short.caption).toBeUndefined();
+
+		// Promoted past its delay, the foreground job is captioned right away.
+		notified = Promise.withResolvers<void>();
+		manager.backgroundJob(held.job.id);
+		await notified.promise;
+		expect(calls.map(([command]) => command)).toEqual([watch.job.label, held.job.label]);
 		watch.finish();
+		held.finish();
 	});
 });
 

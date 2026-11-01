@@ -505,7 +505,7 @@ export class AsyncJobManager {
 		})();
 
 		this.#jobs.set(id, job);
-		this.widgets?.scheduleCaption(job);
+		if (!job.foreground) this.widgets?.scheduleCaption(job);
 		return id;
 	}
 
@@ -600,6 +600,7 @@ export class AsyncJobManager {
 		if (!job) return false;
 		if (!job.foreground) return true;
 		job.foreground = undefined;
+		if (job.status === "running") this.widgets?.scheduleCaption(job);
 		this.#suppressedDeliveries.delete(jobId);
 		if (job.status === "completed" || job.status === "failed") {
 			this.#enqueueDelivery(jobId, job.status === "completed" ? (job.resultText ?? "") : (job.errorText ?? ""));

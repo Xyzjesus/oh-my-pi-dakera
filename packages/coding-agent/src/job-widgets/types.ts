@@ -75,9 +75,10 @@ export interface JobWidgetRegistry {
 	 */
 	view(job: AsyncJob): JobWidgetView | undefined;
 	/**
-	 * Called once per registered job: a command that does not read at a
-	 * glance gets its caption (`AsyncJob.caption`) written once it has run a
-	 * while, whether or not anyone views it.
+	 * Called when a job becomes a background job (registered, or promoted
+	 * from the foreground): a command that does not read at a glance gets its
+	 * caption (`AsyncJob.caption`) written once it has run a while, whether
+	 * or not anyone views it.
 	 */
 	scheduleCaption(job: AsyncJob): void;
 	/** Called after a background refresh changed a shown widget or a caption landed, so a surface that is not polling repaints. */

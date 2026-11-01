@@ -328,8 +328,8 @@ export function buildJobResult(
 		lines.push(`## Completed (${completed.length})\n`);
 		for (const j of completed) {
 			lines.push(`### ${j.id} [${j.type}] — ${j.status}`);
-			lines.push(`Label: ${j.label}`);
 			if (j.intent) lines.push(`Intent: ${j.intent}`);
+			lines.push(`Label: ${j.label}`);
 			const handles = taskAgentHandles(j.id, j, j.agentUrlId);
 			if (handles) {
 				lines.push(

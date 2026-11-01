@@ -90,7 +90,7 @@ import { resolveTernPane } from "../../tools/browser/tern/kind";
 import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
-import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { replaceTabs, shortenEmbeddedPaths, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -898,7 +898,7 @@ export class CommandController {
 				continue;
 			}
 			for (const line of wrapTextWithAnsi(
-				replaceTabs(sanitizeText([job.intent, job.caption, text].filter(Boolean).join("\n"))),
+				shortenEmbeddedPaths(replaceTabs(sanitizeText([job.intent, job.caption, text].filter(Boolean).join("\n")))),
 				Math.max(1, columns - 4 - visibleWidth(indent)),
 			)) {
 				info += `${prefix}${theme.fg("dim", line)}\n`;
