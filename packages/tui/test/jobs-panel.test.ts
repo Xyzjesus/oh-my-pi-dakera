@@ -224,6 +224,26 @@ describe("JobsSheet", () => {
 		expect(text).not.toContain("\x1b[2J");
 	});
 
+	it("flattens a job's intent to one clean row in the terminal fallback", () => {
+		const job: JobsPanelJob = {
+			id: "bash-i",
+			type: "bash",
+			status: "running",
+			label: "sleep 60",
+			intent: `Watch\x1b]0;pwned\x07\tthe\nlog in ${os.homedir()}/logs`,
+			startTime: NOW,
+		};
+		const sheet = new JobsSheet({
+			load: () => ({ running: [job], recent: [] }),
+			inspect: () => undefined,
+			close: vi.fn(),
+		});
+		const row = sheet.render(160).find(line => line.includes("Watch"));
+		expect(row).toContain("Watch the log in ~/logs");
+		expect(row).not.toContain("\x1b]0;");
+		expect(row).not.toContain("\t");
+	});
+
 	it("renders read-only when the source cannot cancel: the jobs and detail stay, Cancel job is gone", () => {
 		// A focused subagent view only watches that agent's jobs (#14814).
 		const source: JobsSheetSource = { load: () => JOBS, inspect: (id: string) => DETAILS[id], close: vi.fn() };
@@ -296,6 +316,27 @@ describe("JobsSheet", () => {
 		expect(lines.find(line => line.includes("bg_27") || line.includes("running  bash"))).toContain(intent);
 		expect(lines.filter(line => line.includes(intent))).toHaveLength(1);
 		expect(lines.some(line => line.includes(caption))).toBe(true);
+	});
+
+	it("shows a caption that lands after its job settled", async () => {
+		await initTheme();
+		const settled: JobsPanelJob = {
+			id: "bg_28",
+			type: "bash",
+			status: "completed",
+			label: "for i in $(seq 40); do sleep 3; done",
+			startTime: NOW,
+			endTime: NOW + 120_000,
+		};
+		let job = settled;
+		const sheet = new JobsSheet({
+			load: () => ({ running: [], recent: [job] }),
+			inspect: () => ({ command: settled.label, pids: [], exitCode: 0, output: "done" }),
+			close: vi.fn(),
+		});
+		expect(byRole(sheet.describe(CX), "omp.jobs.caption")).toHaveLength(0);
+		job = { ...settled, caption: "Waits about 2 min, printing nothing" };
+		expect(texts(byRole(sheet.describe(CX), "omp.jobs.caption")[0]!)).toContain("Waits about 2 min");
 	});
 
 	describe("as a tree of subagents", () => {

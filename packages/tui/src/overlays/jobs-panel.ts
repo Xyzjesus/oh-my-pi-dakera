@@ -150,13 +150,14 @@ export class JobsSheet implements Component {
 		const detail = selected && this.#inspect(selected.id);
 		const now = Date.now();
 		// Elapsed nodes tick on their own; list values and the output pane redraw
-		// when a job starts, settles, leaves or moves in the tree, its process
-		// changes, its output grows, or (while one runs) once a second.
+		// when a job starts, settles, leaves or moves in the tree, gets its
+		// caption (it can land after the job settles), its process changes, its
+		// output grows, or (while one runs) once a second.
 		const key = [
 			rows
 				.map(
 					entry =>
-						`${jobTreeGuide(entry, theme)}${entry.kind === "job" ? `${entry.job.id}:${entry.job.status}` : entry.agent.id}`,
+						`${jobTreeGuide(entry, theme)}${entry.kind === "job" ? `${entry.job.id}:${entry.job.status}:${entry.job.caption ?? ""}` : entry.agent.id}`,
 				)
 				.join(","),
 			selected?.id,
@@ -204,12 +205,9 @@ export class JobsSheet implements Component {
 			const cursor = job === selected ? ">" : " ";
 			const age = formatDuration(jobAge(job, now));
 			const agent = entry.agent && entry.agent.id !== job.label ? `${entry.agent.id}: ` : "";
-			lines.push(
-				truncateToWidth(
-					`${cursor} ${guide}${job.status}  ${job.type} ${age}  ${agent}${job.intent ?? collapseCommand(job.label)}`,
-					width,
-				),
-			);
+			// The intent is model-written: strip terminal controls and flatten it to one row like the command.
+			const title = shortenEmbeddedPaths(collapseCommand(sanitizeText(job.intent ?? job.label)));
+			lines.push(truncateToWidth(`${cursor} ${guide}${job.status}  ${job.type} ${age}  ${agent}${title}`, width));
 		}
 		const detail = selected && this.#inspect(selected.id);
 		if (detail) {
