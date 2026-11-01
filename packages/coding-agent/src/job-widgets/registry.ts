@@ -265,7 +265,8 @@ export class JobWidgets implements JobWidgetRegistry {
 		try {
 			caption = await captioner(brief, controller.signal);
 		} catch (error) {
-			if (!controller.signal.aborted) logger.debug("Job caption failed", { jobId: entry.job.id, error: String(error) });
+			if (!controller.signal.aborted)
+				logger.debug("Job caption failed", { jobId: entry.job.id, error: String(error) });
 		} finally {
 			this.#inFlight -= 1;
 			if (entry.captionRequest === controller) entry.captionRequest = undefined;

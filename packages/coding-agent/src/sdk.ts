@@ -2357,20 +2357,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			})
 		: undefined;
 	if (asyncJobManager) {
-		const usagePurpose = (purpose: string): ModelJobWidgetAuthorOptions["onUsage"] => message => {
-			if (!message.usage) return;
-			sessionManager.appendModelUsage(
-				{
-					purpose,
-					api: message.api,
-					provider: message.provider,
-					model: message.model,
-					usage: message.usage,
-					stopReason: message.stopReason,
-				},
-				{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
-			);
-		};
+		const usagePurpose =
+			(purpose: string): ModelJobWidgetAuthorOptions["onUsage"] =>
+			message => {
+				if (!message.usage) return;
+				sessionManager.appendModelUsage(
+					{
+						purpose,
+						api: message.api,
+						provider: message.provider,
+						model: message.model,
+						usage: message.usage,
+						stopReason: message.stopReason,
+					},
+					{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
+				);
+			};
 		const cheapModelOptions: Omit<ModelJobWidgetAuthorOptions, "onUsage"> = {
 			settings,
 			modelRegistry,

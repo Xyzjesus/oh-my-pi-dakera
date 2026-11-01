@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { AsyncJobManager, type AsyncJob } from "../../src/async/job-manager";
-import { type JobWidgetAuthorRequest, type JobWidgetBrief, JobWidgets, normalizeJobCaption, TextTap } from "../../src/job-widgets";
+import {
+	type JobWidgetAuthorRequest,
+	type JobWidgetBrief,
+	JobWidgets,
+	normalizeJobCaption,
+	TextTap,
+} from "../../src/job-widgets";
 
 const REQ_SPEC = {
 	title: "load test",
