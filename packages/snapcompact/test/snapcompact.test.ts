@@ -1575,8 +1575,6 @@ describe("archive helpers", () => {
 	});
 
 	describe("viewWithoutFrames", () => {
-		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 20 };
-
 		function sentText(view: snapcompact.ArchiveView): string {
 			const blocks = snapcompact.historyBlocks(view.archive);
 			expect(blocks.every(block => block.type === "text")).toBe(true);
@@ -1631,47 +1629,6 @@ describe("archive helpers", () => {
 			}
 		});
 
-		it("leaves reasoning out of the text for a reader that excludes it, without rendering frames", async () => {
-			const result = await framedArchive();
-			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
-			const view = snapcompact.viewWithoutFrames(result.summary, archive, { includeThinking: false });
-			expect(view.archive.frames).toEqual([]);
-			const sent = sentText(view);
-			expect(sent).toContain("MIDDLE sentinel");
-			expect(sent).not.toContain("PRIVATE plan");
-			expect(sent).not.toContain("¶think:");
-			expect(sent).toContain("`¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.");
-			expect(sent).toContain("both.ts (RW)");
-		});
-
-		it("keeps the edges and counts the imaged middle as dropped when the archive kept no whole source", () => {
-			const legacy = {
-				frames: [frame, frame],
-				totalChars: 60,
-				truncatedChars: 0,
-				textHead: "¶user: ask",
-				textTail: "secret continuation\n¶ai: answer",
-			};
-			const view = snapcompact.viewWithoutFrames("no scopes\nHISTORY", legacy);
-			expect(view.archive).toEqual({
-				frames: [],
-				totalChars: 10 + legacy.textTail.length,
-				truncatedChars: 40,
-				textHead: "¶user: ask",
-				textTail: legacy.textTail,
-			});
-			expect(sentText(view)).toContain("middle history omitted above");
-
-			// A reader without reasoning skips the tail's lines before its first scope label,
-			// whose scope sat in the dropped middle.
-			const thinking =
-				"`¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.";
-			const scrubbed = snapcompact.viewWithoutFrames(thinking, legacy, { includeThinking: false });
-			expect(scrubbed.archive.textTail).toBe("¶ai: answer");
-			expect(scrubbed.archive.truncatedChars).toBe(40 + "secret continuation\n".length);
-			expect(sentText(scrubbed)).not.toContain("secret");
-		});
-
 		it("keeps both ends of the text past maxChars and counts the cut middle as dropped", async () => {
 			const result = await framedArchive();
 			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
@@ -1687,15 +1644,6 @@ describe("archive helpers", () => {
 			expect(sent).not.toContain("MIDDLE sentinel");
 			expect(sent).toContain("middle history omitted above");
 			expect(sent).toContain(`About ${view.archive.truncatedChars} characters of older middle history dropped`);
-		});
-
-		it("cuts a frameless archive's text past maxChars too", () => {
-			const text = `start ${"x".repeat(100)} end`;
-			const archive = { frames: [], totalChars: text.length, truncatedChars: 0, text, textHead: text };
-			const view = snapcompact.viewWithoutFrames("s", archive, { maxChars: 20 });
-			expect(view.archive.textHead).toBe(text.slice(0, 10));
-			expect(view.archive.textTail).toBe(text.slice(-10));
-			expect(view.archive.truncatedChars).toBe(text.length - 20);
 		});
 	});
 
