@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import * as path from "node:path";
-import { $ } from "bun";
+import { $, type Subprocess } from "bun";
 
 const RUST_AFFECTING_FILE_NAMES = [
 	"Cargo.toml",
@@ -21,10 +21,11 @@ const RUST_AFFECTING_FILE_NAMES = [
 // changed Rust against any of them: a missing, disagreeing or unconfirmed trunk is
 // uncertainty, not evidence.
 const TRUNK_REMOTES = ["upstream", "origin"] as const satisfies readonly string[];
-// How long the gate waits for a remote to name its default branch. It asks only a
-// remote with no recorded default (`git clone` records one; `git remote add` and
-// `git fetch` do not), and asks them all at once, so a remote that never answers
-// delays the run by this much at most, and the run then goes ahead.
+// How long the gate waits for a remote to name its default branch. It asks every
+// configured trunk remote: refs/remotes/<remote>/HEAD is a cache a remote can
+// change behind, so it cannot establish which branch is safe to measure against.
+// The remote queries start together, so silent remotes delay the run by this much
+// at most, then the Rust half runs.
 const REMOTE_ANSWER_TIMEOUT_MS = 10_000;
 // Vendored path-patched crates are workspace members for Bazel hermeticity
 // (path-patch rendering is machine-local), but cargo dev tasks keep their
@@ -272,15 +273,12 @@ async function collectBranchChanges(): Promise<BranchChanges> {
 }
 
 /**
- * The branch `remote` calls its trunk: the `refs/remotes/<remote>/HEAD` that
- * `git clone` records, else the remote's own answer. A remote added with
- * `git remote add` and fetched records none, and guessing `main` for it told a
- * `master` repository to fetch a `main` it does not have.
+ * The branch `remote` calls its trunk. refs/remotes/<remote>/HEAD is only a
+ * checkout-time cache: a remote can move its default branch while the cache still
+ * names main, and a stale local origin/main can then hide a Rust change. Ask the
+ * remote each time instead; an unanswerable remote is uncertainty, not a cache hit.
  */
 async function getDefaultBranch(remote: string): Promise<{ branch: string } | { unknown: string }> {
-	const prefix = `refs/remotes/${remote}/`;
-	const recorded = await git("symbolic-ref", "--quiet", `${prefix}HEAD`);
-	if (recorded.ok) return { branch: recorded.text.trim().slice(prefix.length) };
 	const advertised = await gitAskingRemote("ls-remote", "--symref", remote, "HEAD");
 	if (!advertised.ok) return { unknown: advertised.error };
 	const branch = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(advertised.text)?.[1];
@@ -289,16 +287,27 @@ async function getDefaultBranch(remote: string): Promise<{ branch: string } | { 
 
 /**
  * `git` for a command that talks to a remote: it never prompts, and it gives up
- * after REMOTE_ANSWER_TIMEOUT_MS. A timeout stops git without waiting for its
- * output streams, so a remote that never answers cannot delay the Rust gate.
+ * after REMOTE_ANSWER_TIMEOUT_MS. It runs in its own process group, so giving up
+ * also ends the ssh or remote helper git started; killing git alone leaves that
+ * transport running, reparented to init, one more for every check.
  */
 async function gitAskingRemote(...args: string[]): Promise<GitResult> {
 	const child = Bun.spawn(["git", ...args], {
 		cwd: repoRoot,
-		env: { ...Bun.env, GIT_TERMINAL_PROMPT: "0" },
+		env: {
+			...Bun.env,
+			GIT_TERMINAL_PROMPT: "0",
+			// GIT_TERMINAL_PROMPT does not block askpass helpers. A command that
+			// exits 1 prevents both an environment GIT_ASKPASS and core.askPass
+			// from launching a graphical credential prompt in the background.
+			GIT_ASKPASS: "false",
+			SSH_ASKPASS: "false",
+			SSH_ASKPASS_REQUIRE: "never",
+		},
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
+		detached: true,
 	});
 	const finished = Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
 	const { promise: timedOut, resolve } = Promise.withResolvers<"timed out">();
@@ -306,13 +315,27 @@ async function gitAskingRemote(...args: string[]): Promise<GitResult> {
 	const outcome = await Promise.race([finished, timedOut]);
 	clearTimeout(timer);
 	if (outcome === "timed out") {
-		child.kill("SIGKILL");
+		killProcessGroup(child);
 		return { ok: false, error: `git ${args[0]} got no answer within ${REMOTE_ANSWER_TIMEOUT_MS / 1000} s` };
 	}
 	const [exitCode, stdout, stderr] = outcome;
 	if (exitCode === 0) return { ok: true, text: stdout };
 	const firstLine = stderr.trim().split("\n")[0];
 	return { ok: false, error: `git ${args[0]}: ${firstLine || `exit ${exitCode}`}` };
+}
+
+function killProcessGroup(child: Subprocess): void {
+	// Windows has no process groups.
+	if (process.platform === "win32") {
+		child.kill("SIGKILL");
+		return;
+	}
+	try {
+		process.kill(-child.pid, "SIGKILL");
+	} catch (error) {
+		// ESRCH: every process in the group exited between the timeout and the kill.
+		if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+	}
 }
 
 async function git(...args: string[]): Promise<GitResult> {

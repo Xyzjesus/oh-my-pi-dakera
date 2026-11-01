@@ -117,6 +117,55 @@ async function followCures(fixture: Fixture, cwd: string): Promise<{ cures: stri
 	}
 }
 
+function isRunning(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+		throw error;
+	}
+	return true;
+}
+
+/**
+ * Whether `pid` has exited within `ms`. A killed orphan is reaped by whichever
+ * process adopted it, a moment later, so a zombie counts as exited. The wait is
+ * real time because it watches another process tree, which fake timers cannot move.
+ */
+async function isGoneWithin(pid: number, ms: number): Promise<boolean> {
+	const deadline = Date.now() + ms;
+	for (;;) {
+		if (!isRunning(pid)) return true;
+		try {
+			const stat = await Bun.file(`/proc/${pid}/stat`).text();
+			if (stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z")) return true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+		if (Date.now() >= deadline) return false;
+		await Bun.sleep(100);
+	}
+}
+
+function killIfRunning(pid: number): void {
+	if (isRunning(pid)) process.kill(pid, "SIGKILL");
+}
+
+async function makeCredentialRefusingServer(): Promise<Bun.Server<unknown>> {
+	const server = Bun.serve({
+		port: 0,
+		fetch: () =>
+			new Response("credentials required", {
+				status: 401,
+				headers: { "WWW-Authenticate": 'Basic realm="run-rs-task test"' },
+			}),
+	});
+	cleanups.push(async () => {
+		server.stop();
+	});
+	return server;
+}
+
 describe.skipIf(process.platform === "win32")("run-rs-task.ts check:rs", () => {
 	// Failure mode: a contributor commits a Rust change, runs `bun check` on the
 	// clean tree, and gets a green gate that never looked at their Rust.
@@ -410,24 +459,136 @@ describe.skipIf(process.platform === "win32")("run-rs-task.ts check:rs", () => {
 		CASE_TIMEOUT_MS,
 	);
 
+	// Failure mode: a `git clone` cache can still name `main` after the remote
+	// moved its default to `master`; a stale local origin/main at HEAD then makes a
+	// committed Rust change diff clean and skip.
+	test(
+		"a stale recorded main default does not hide a Rust change after the remote moves to master",
+		async () => {
+			const fixture = await makeFixture();
+			await git(fixture.work, "switch", "-q", "-c", "feature");
+			await commitFile(fixture.work, "crates/x/src/lib.rs", "pub fn x() -> u8 { 8 }\n", "rust change");
+			await git(fixture.origin, "branch", "-q", "-m", "main", "master");
+			await git(fixture.work, "update-ref", "refs/remotes/origin/main", "HEAD");
+
+			const { cures, result } = await followCures(fixture, fixture.work);
+
+			expect(cures).toEqual([]);
+			expect(result.cargoRan).toBe(true);
+			expect(result.output).toContain("origin's default branch is master");
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: after a remote deletes its `main`, a clone's stale recorded
+	// origin/HEAD still names it, so the gate prints the same failing main-fetch cure.
+	test(
+		"a stale recorded main default whose remote branch is gone prints no cure",
+		async () => {
+			const fixture = await makeFixture();
+			await git(fixture.origin, "branch", "-q", "-m", "main", "master");
+			await git(fixture.work, "update-ref", "-d", "refs/remotes/origin/main");
+
+			const { cures, result } = await followCures(fixture, fixture.work);
+
+			expect(cures).toEqual([]);
+			expect(result.cargoRan).toBe(true);
+			expect(result.output).toContain("origin's default branch is master");
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: GIT_TERMINAL_PROMPT=0 suppresses git's own terminal prompt,
+	// but not a configured GIT_ASKPASS or core.askPass helper; a background gate can
+	// launch a credential dialog despite saying it cannot prompt.
+	test(
+		"a credential-refusing remote never invokes configured askpass helpers",
+		async () => {
+			const fixture = await makeFixture();
+			const server = await makeCredentialRefusingServer();
+			const askpass = path.join(fixture.shimDir, "askpass");
+			const invoked = path.join(fixture.root, "askpass-invoked");
+			await writeExecutable(askpass, `#!/bin/sh\necho "$@" >> '${invoked}'\nexit 1\n`);
+			await git(fixture.work, "remote", "set-head", "origin", "--delete");
+			await git(fixture.work, "update-ref", "-d", "refs/remotes/origin/main");
+			await git(fixture.work, "remote", "set-url", "origin", server.url.toString());
+
+			const result = await runCheckRs(fixture, fixture.work, {
+				GIT_ASKPASS: askpass,
+				GIT_CONFIG_COUNT: "1",
+				GIT_CONFIG_KEY_0: "core.askPass",
+				GIT_CONFIG_VALUE_0: askpass,
+			});
+
+			expect(result.cargoRan).toBe(true);
+			expect(result.output).toContain("could not learn origin's default branch");
+			expect(await Bun.file(invoked).exists()).toBe(false);
+		},
+		CASE_TIMEOUT_MS,
+	);
+
 	// Failure mode: a remote that never answers (a dropped network, an SSH login
 	// that hangs) stalls every `bun check` until someone kills it, or the gate gives
-	// up and guesses a fetch of `main`.
+	// up and guesses a fetch of `main`; or the gate stops git but leaves the ssh git
+	// started running, so each check against that remote leaks another process. The
+	// SSH variant is explicit: it makes git run the real connection path, not its
+	// separate `-G` probe.
 	test(
-		"a remote that never answers runs the Rust gate once the 10 s bound passes, and prints no cure",
+		"a remote that never answers runs the Rust gate once the 10 s bound passes, prints no cure, and leaves no transport running",
 		async () => {
 			const fixture = await makeFixture();
 			const hungSsh = path.join(fixture.shimDir, "hung-ssh");
-			await writeExecutable(hungSsh, "#!/bin/sh\nexec sleep 60\n");
+			const pidFile = path.join(fixture.root, "transport.pid");
+			await writeExecutable(hungSsh, `#!/bin/sh\necho $$ > '${pidFile}'\nexec sleep 60\n`);
 			await git(fixture.work, "remote", "set-head", "origin", "--delete");
 			await git(fixture.work, "update-ref", "-d", "refs/remotes/origin/main");
 			await git(fixture.work, "remote", "set-url", "origin", "ssh://git@example.invalid/oh-my-pi.git");
 
-			const result = await runCheckRs(fixture, fixture.work, { GIT_SSH_COMMAND: hungSsh });
+			const result = await runCheckRs(fixture, fixture.work, {
+				GIT_SSH_COMMAND: hungSsh,
+				GIT_SSH_VARIANT: "ssh",
+			});
+			const transportPid = Number((await Bun.file(pidFile).text()).trim());
+			cleanups.push(async () => killIfRunning(transportPid));
 
 			expect(result.cargoRan).toBe(true);
 			expect(result.output).toContain("no answer within 10 s");
 			expect(result.output).not.toContain("To let it skip");
+			expect(await isGoneWithin(transportPid, 5_000)).toBe(true);
+		},
+		SILENT_REMOTE_CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: sequential remote probes make two silent configured remotes
+	// stall the gate for two bounds. The two ssh processes also prove that the
+	// process-group kill closes every transport, not just the first one.
+	test(
+		"two silent remotes complete within one bound and leave no transport running",
+		async () => {
+			const fixture = await makeFixture();
+			const hungSsh = path.join(fixture.shimDir, "hung-ssh");
+			const pidFile = path.join(fixture.root, "transport.pids");
+			await writeExecutable(hungSsh, `#!/bin/sh\necho $$ >> '${pidFile}'\nexec sleep 60\n`);
+			await git(fixture.work, "remote", "set-head", "origin", "--delete");
+			await git(fixture.work, "update-ref", "-d", "refs/remotes/origin/main");
+			await git(fixture.work, "remote", "set-url", "origin", "ssh://git@example.invalid/origin.git");
+			await git(fixture.work, "remote", "add", "upstream", "ssh://git@example.invalid/upstream.git");
+			const started = performance.now();
+
+			const result = await runCheckRs(fixture, fixture.work, {
+				GIT_SSH_COMMAND: hungSsh,
+				GIT_SSH_VARIANT: "ssh",
+			});
+			const elapsedMs = performance.now() - started;
+			const pids = (await Bun.file(pidFile).text()).trim().split(/\s+/).map(Number);
+			cleanups.push(async () => {
+				for (const pid of pids) killIfRunning(pid);
+			});
+
+			expect(result.cargoRan).toBe(true);
+			expect(result.output).toContain("no answer within 10 s");
+			expect(elapsedMs).toBeLessThan(20_000);
+			for (const pid of pids) expect(await isGoneWithin(pid, 5_000)).toBe(true);
 		},
 		SILENT_REMOTE_CASE_TIMEOUT_MS,
 	);
