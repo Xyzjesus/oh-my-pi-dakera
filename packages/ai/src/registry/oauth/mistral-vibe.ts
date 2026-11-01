@@ -9,7 +9,7 @@
  * The minted key is a regular Mistral API key billed against the plan's Vibe Code quota.
  */
 import { type } from "@oh-my-pi/omptype";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, ptree } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import { getRetryAfterMsFromHeaders } from "../../utils/retry-after";
@@ -50,11 +50,6 @@ function oauthError(message: string, kind: AIError.OAuthErrorKind, status?: numb
 	return new AIError.OAuthError(message, { kind, provider: PROVIDER, status });
 }
 
-function requestSignal(signal: AbortSignal | undefined): AbortSignal {
-	const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-	return signal ? AbortSignal.any([signal, timeout]) : timeout;
-}
-
 function throwIfCancelled(signal: AbortSignal | undefined): void {
 	if (signal?.aborted) throw new AIError.LoginCancelledError("Login cancelled");
 }
@@ -73,7 +68,7 @@ async function post(
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(body),
-			signal: requestSignal(ctrl.signal),
+			signal: ptree.combineSignals(ctrl.signal, REQUEST_TIMEOUT_MS),
 		});
 	} catch (error) {
 		throwIfCancelled(ctrl.signal);
@@ -127,7 +122,7 @@ function signInPoller(
 		let payload: unknown;
 		let cause: unknown;
 		try {
-			response = await fetchImpl(pollUrl, { signal: requestSignal(signal) });
+			response = await fetchImpl(pollUrl, { signal: ptree.combineSignals(signal, REQUEST_TIMEOUT_MS) });
 			payload = await response.json();
 		} catch (error) {
 			if (signal?.aborted) throw error;
