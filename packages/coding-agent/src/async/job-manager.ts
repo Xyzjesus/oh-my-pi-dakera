@@ -234,6 +234,7 @@ interface AsyncJobDelivery {
 		| "startTime"
 		| "endTime"
 		| "label"
+		| "intent"
 		| "structured"
 		| "agentId"
 		| "agentOutputPublished"
@@ -1201,6 +1202,7 @@ export class AsyncJobManager {
 						startTime: job.startTime,
 						endTime: job.endTime,
 						label: job.label,
+						intent: job.intent,
 						structured: job.structured,
 						agentId: job.agentId,
 						agentOutputPublished: job.agentOutputPublished,
@@ -1342,6 +1344,7 @@ export class AsyncJobManager {
 			startTime: snapshot.startTime,
 			endTime: snapshot.endTime,
 			label: snapshot.label,
+			intent: snapshot.intent,
 			abortController: new AbortController(),
 			promise: Promise.resolve(),
 			resultText: delivery.text,

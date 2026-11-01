@@ -150,7 +150,11 @@ export class JobWidgets implements JobWidgetRegistry {
 		const request = new AbortController();
 		// A foreground job promoted to the background may already be past the delay.
 		const delay = Math.max(0, job.startTime + this.#options.authorAfterMs - this.#now());
-		const timer = setTimeout(() => void this.#writeCaption(job, command, request), delay);
+		const timer = setTimeout(() => {
+			// Eligibility is decided here: a job that settles while queued behind others still gets its caption.
+			if (job.status === "running" && this.#enabled()) void this.#writeCaption(job, command, request);
+			else this.#cancelCaption(job.id);
+		}, delay);
 		timer.unref();
 		this.#captions.set(job.id, { timer, request });
 	}
@@ -257,10 +261,7 @@ export class JobWidgets implements JobWidgetRegistry {
 		void this.#writeSpec(entry, brief, previous);
 	}
 
-	/**
-	 * Writes the caption of a job still running when its delay ran out, unless
-	 * widgets are off; waits its turn behind `maxInFlight` others.
-	 */
+	/** Writes a job's caption once fewer than `maxInFlight` others are being written. */
 	async #writeCaption(job: AsyncJob, command: string, request: AbortController): Promise<void> {
 		if (this.#captionsInFlight >= this.#options.maxInFlight) {
 			this.#captionQueue.push(() => void this.#writeCaption(job, command, request));
@@ -268,7 +269,7 @@ export class JobWidgets implements JobWidgetRegistry {
 		}
 		this.#captionsInFlight += 1;
 		try {
-			if (request.signal.aborted || job.status !== "running" || !this.#enabled()) return;
+			if (request.signal.aborted) return;
 			const caption = await this.#captioner?.(command, job.intent, request.signal);
 			if (!caption || request.signal.aborted) return;
 			this.#captionTexts.set(job, caption);
