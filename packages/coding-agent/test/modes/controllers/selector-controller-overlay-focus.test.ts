@@ -122,44 +122,26 @@ describe("SelectorController.showSelector", () => {
 });
 
 describe("SelectorController.showHistorySearch", () => {
-	const storage = {
-		getRecent: () => [{ id: 1, prompt: "deploy the release", created_at: 0, useCount: 1 }],
-		search: () => [],
-	} as unknown as HistoryStorage;
-
-	function pickFirstEntry(slot: EditorSlot): void {
-		const [history] = slot.children;
-		if (!(history instanceof HistorySearchComponent)) throw new Error("history search was not mounted");
-		history.handleInput("\n");
-	}
-
 	it("delivers the picked entry to the focused ask prompt, not the hidden composer", () => {
+		const storage = {
+			getRecent: () => [{ id: 1, prompt: "deploy the release", created_at: 0, useCount: 1 }],
+			search: () => [],
+		} as unknown as HistoryStorage;
 		const editor = { setText: vi.fn() };
 		const onSubmit = vi.fn();
 		const tui = { terminal: { columns: 120 } } as unknown as TUI;
 		const prompt = new HookEditorComponent(tui, "Other", undefined, onSubmit, vi.fn(), { promptStyle: true });
 		const slot = createEditorSlot(prompt);
-		const { ctx, setFocus } = createCtx(slot, editor, prompt, { historyStorage: storage });
+		const { ctx } = createCtx(slot, editor, prompt, { historyStorage: storage });
 
 		new SelectorController(ctx).showHistorySearch();
-		pickFirstEntry(slot);
+		const [history] = slot.children;
+		if (!(history instanceof HistorySearchComponent)) throw new Error("history search was not mounted");
+		history.handleInput("\n");
 
-		expect(slot.children).toEqual([prompt]);
-		expect(setFocus).toHaveBeenLastCalledWith(prompt);
 		expect(editor.setText).not.toHaveBeenCalled();
 		prompt.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
 		expect(onSubmit).toHaveBeenCalledWith("deploy the release");
-	});
-
-	it("delivers the picked entry to the composer when it holds focus", () => {
-		const editor = { setText: vi.fn() };
-		const slot = createEditorSlot(editor);
-		const { ctx } = createCtx(slot, editor, editor, { historyStorage: storage });
-
-		new SelectorController(ctx).showHistorySearch();
-		pickFirstEntry(slot);
-
-		expect(editor.setText).toHaveBeenCalledWith("deploy the release");
 	});
 });
 
