@@ -110,7 +110,7 @@ import {
 	resolveContextPromotionConfiguredTarget,
 	resolveRoleModelFull,
 } from "./role-models";
-import type { SessionContext } from "./session-context";
+import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
@@ -628,6 +628,14 @@ export class SessionMaintenance {
 
 	get #tokenizer() {
 		return this.#host.agent.tokenizer;
+	}
+
+	/** Frame budget and blob resolution that rebuild a branch's context as the live session sends it. */
+	get #contextBuildOptions(): BuildSessionContextOptions {
+		return {
+			maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model),
+			resolveFrameData: data => this.#host.sessionManager.resolveFrameData(data),
+		};
 	}
 
 	get #goalModeState(): GoalModeState | undefined {
@@ -1282,37 +1290,38 @@ export class SessionMaintenance {
 			const compactionSettings = this.#compactionSettings;
 			methods = resolveCompactionMethodOrder(compactMode?.overrides.methodOrder ?? compactionSettings.methodOrder);
 			const explicitSnapcompact = compactMode?.name === "snapcompact";
-			let selectedMethod: CompactionMethod | undefined;
-			for (let index = methodOffset; index < methods.length; index++) {
-				const method = methods[index];
-				if (method === "remote") {
-					if (canUseRemoteCompaction(activeModel, resolveMethodSettings(compactionSettings, method))) {
-						selectedMethod = method;
-						selectedMethodIndex = index;
-						break;
-					}
-					continue;
+			const runsManually = (method: CompactionMethod): boolean => {
+				switch (method) {
+					case "remote":
+						return canUseRemoteCompaction(activeModel, resolveMethodSettings(compactionSettings, method));
+					case "snapcompact":
+						return (
+							explicitSnapcompact ||
+							(!customInstructions && !options?.internalGuidance && sendsImageInputOnWire(activeModel))
+						);
+					case "soft":
+						return true;
+					case "handoff":
+					case "shake":
+						return false;
 				}
-				if (method === "snapcompact") {
-					if (
-						explicitSnapcompact ||
-						(!customInstructions && !options?.internalGuidance && sendsImageInputOnWire(activeModel))
-					) {
-						selectedMethod = method;
-						selectedMethodIndex = index;
-						break;
-					}
-					continue;
-				}
-				if (method === "soft") {
-					selectedMethod = method;
-					selectedMethodIndex = index;
-					break;
-				}
-			}
+			};
+			selectedMethodIndex = methods.findIndex((method, index) => index >= methodOffset && runsManually(method));
+			const selectedMethod = methods[selectedMethodIndex];
 			if (!selectedMethod) {
 				throw new Error("No configured compaction method can run manually.");
 			}
+			// `/compact snapcompact` pins the order to snapcompact alone, so its
+			// blockers name the `/compact` mode of the next manual method (remote or
+			// soft): plain `/compact` can run an experimental rollover instead.
+			const snapcompactFailure = (reason: string): Error => {
+				if (!explicitSnapcompact) return new Error(reason);
+				const fallback =
+					resolveCompactionMethodOrder(compactionSettings.methodOrder).find(
+						method => method !== "snapcompact" && runsManually(method),
+					) ?? "soft";
+				return new Error(`${reason}. Run /compact ${fallback} instead.`);
+			};
 
 			const effectiveSettings = resolveMethodSettings(compactionSettings, selectedMethod);
 			const availableModels = this.#host.modelRegistry.getAvailable();
@@ -1394,8 +1403,7 @@ export class SessionMaintenance {
 				const reason = this.#model.input.includes("image")
 					? `${this.#model.id}'s provider strips image input`
 					: `${this.#model.id} is text-only`;
-				this.#host.emitNotice("warning", `snapcompact needs a vision-capable model (${reason})`, "compaction");
-				throw new Error(`snapcompact cannot run locally: ${reason}.`);
+				throw snapcompactFailure(`snapcompact needs a vision-capable model (${reason})`);
 			} else if (snapcompactReady) {
 				const text = snapcompact.serializeConversation(
 					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
@@ -1410,13 +1418,8 @@ export class SessionMaintenance {
 				const renderScan = snapcompact.scanRenderability(probeText, { shape: snapcompactShape });
 				if (!renderScan.isSafe) {
 					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
-					this.#host.emitNotice(
-						"warning",
-						`snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%).`,
-						"compaction",
-					);
-					throw new Error(
-						`snapcompact cannot render this conversation locally: unsupported characters for selected snapcompact font (${percent}%).`,
+					throw snapcompactFailure(
+						`snapcompact cannot render this conversation: unsupported characters for selected snapcompact font (${percent}%)`,
 					);
 				}
 			}
@@ -1439,12 +1442,7 @@ export class SessionMaintenance {
 					logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
 						model: this.#model?.id,
 					});
-					this.#host.emitNotice(
-						"warning",
-						"snapcompact: kept history alone exceeds the context budget.",
-						"compaction",
-					);
-					throw new Error("snapcompact cannot run locally: kept history alone exceeds the context budget.");
+					throw snapcompactFailure("snapcompact cannot run: kept history alone exceeds the context budget");
 				} else {
 					const shape = snapcompactShape;
 					if (!shape) {
@@ -1471,14 +1469,7 @@ export class SessionMaintenance {
 							framePayloadBytes,
 							budget: frameByteBudget,
 						});
-						this.#host.emitNotice(
-							"warning",
-							"snapcompact produced too much standing image payload.",
-							"compaction",
-						);
-						throw new Error(
-							"snapcompact cannot run locally: standing image payload exceeds the per-request budget.",
-						);
+						throw snapcompactFailure("snapcompact produced too much standing image payload for one request");
 					}
 					const ctxWindow = this.#model?.contextWindow ?? 0;
 					const budget =
@@ -1503,19 +1494,13 @@ export class SessionMaintenance {
 							projected: projectedForReduction,
 							reductionBaseline,
 						});
-						this.#host.emitNotice("warning", "snapcompact would not reduce context.", "compaction");
-						throw new Error("snapcompact would not reduce context locally.");
+						throw snapcompactFailure("snapcompact would not reduce context");
 					}
 					if (projected > budget) {
 						logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
 							model: this.#model?.id,
 						});
-						this.#host.emitNotice(
-							"warning",
-							"snapcompact could not bring the context under the limit.",
-							"compaction",
-						);
-						throw new Error("snapcompact could not bring the context under the limit locally.");
+						throw snapcompactFailure("snapcompact could not bring the context under the limit");
 					}
 				}
 			}
@@ -1638,7 +1623,7 @@ export class SessionMaintenance {
 			) {
 				this.#host.emitNotice(
 					"warning",
-					`${methods[selectedMethodIndex]} compaction failed; trying the next preferred method`,
+					`${methods[selectedMethodIndex]} compaction failed (${err.message}); trying the next preferred method`,
 					"compaction",
 				);
 				try {
@@ -2732,14 +2717,15 @@ export class SessionMaintenance {
 	/**
 	 * Local pre-compaction context for a snapcompact preparation, measured on the
 	 * exact same non-message overhead and tokenizer as
-	 * {@link #projectSnapcompactContextTokens}: fixed overhead + the region that
-	 * would be archived (`messagesToSummarize` + `turnPrefixMessages`) + the kept
-	 * tail (`recentMessages`). Comparing the projection against this
+	 * {@link #projectSnapcompactContextTokens}: fixed overhead + the live
+	 * context's standing summary with its archive frames + the region that
+	 * would be archived (`messagesToSummarize` + `turnPrefixMessages`) + the
+	 * kept tail (`recentMessages`). Comparing the projection against this
 	 * self-consistent baseline isolates the single thing snapcompact changes —
-	 * the archived region becomes an imaged summary — so a result whose frames
-	 * cost more tokens than the text they replace is rejected, while genuine
-	 * reductions are not. Recomputed from the live messages rather than
-	 * `preparation.tokensBefore`, which carries only provider usage (zero for
+	 * the standing summary and the archived region become one imaged summary — so
+	 * a result whose frames cost more tokens than what they replace is rejected,
+	 * while genuine reductions are not. Recomputed from the live messages rather
+	 * than `preparation.tokensBefore`, which carries only provider usage (zero for
 	 * imported sessions with no usage metadata, or a deflated figure behind a
 	 * payload-shrinking hook) and would falsely reject reducing archives (#10023).
 	 *
@@ -2759,6 +2745,21 @@ export class SessionMaintenance {
 			this.#tokenizer,
 			this.#host.settings.revision,
 		);
+		// The live summary, not one rebuilt from the entry: a resumed session's
+		// archive frames are blob references only the session manager resolves.
+		// Context notes can precede it. An archive with frames but no source text
+		// (written before `Archive.text`) cannot be re-rendered into the new one,
+		// so its frames are not counted as replaced: crediting them would let a
+		// smaller candidate drop the only copy of that history.
+		const previousArchive = snapcompact.getPreservedArchive(preparation.previousPreserveData);
+		const carriesStandingSummary =
+			!previousArchive ||
+			previousArchive.frames.length === 0 ||
+			snapcompact.archiveSourceText(previousArchive) !== undefined;
+		const standingSummary = carriesStandingSummary
+			? this.#host.messages().find(message => message.role === "compactionSummary")
+			: undefined;
+		if (standingSummary) tokens += this.#tokenizer.countMessage(standingSummary);
 		tokens += this.#tokenizer.countMessages(preparation.messagesToSummarize, opts);
 		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages, opts);
 		tokens += this.#tokenizer.countMessages(preparation.recentMessages, opts);
@@ -4159,9 +4160,7 @@ export class SessionMaintenance {
 			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
 		};
 		const projected = [...branch, pending];
-		const rebuilt = buildSessionContext(projected, undefined, undefined, {
-			maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model),
-		});
+		const rebuilt = buildSessionContext(projected, undefined, undefined, this.#contextBuildOptions);
 		return nonMessageTokens + this.#countProjectedMessages(rebuilt.messages, projected);
 	}
 
@@ -4208,9 +4207,7 @@ export class SessionMaintenance {
 			this.#host.settings.revision,
 		);
 		if (branch.length === 0) return nonMessageTokens;
-		const current = buildSessionContext(branch, undefined, undefined, {
-			maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model),
-		});
+		const current = buildSessionContext(branch, undefined, undefined, this.#contextBuildOptions);
 		return nonMessageTokens + this.#countProjectedMessages(current.messages);
 	}
 
@@ -4239,9 +4236,7 @@ export class SessionMaintenance {
 		const keptEntries = firstKeptIdx >= 0 ? branch.slice(firstKeptIdx) : [];
 		const keptContext =
 			keptEntries.length > 0
-				? buildSessionContext(keptEntries, undefined, undefined, {
-						maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model),
-					})
+				? buildSessionContext(keptEntries, undefined, undefined, this.#contextBuildOptions)
 				: undefined;
 		const keptTokens = keptContext
 			? this.#countProjectedMessages(keptContext.messages)
