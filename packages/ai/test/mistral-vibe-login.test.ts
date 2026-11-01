@@ -153,6 +153,24 @@ describe("mistral vibe browser sign-in", () => {
 		expect(mistral.calls).toHaveLength(0);
 	});
 
+	it("reports a cancel during the response body read as a cancelled login", async () => {
+		const controller = new AbortController();
+		// Headers arrive, then the body stream fails once the request signal aborts.
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			const body = new ReadableStream({
+				start(stream) {
+					init?.signal?.addEventListener("abort", () => stream.error(init.signal?.reason));
+				},
+			});
+			queueMicrotask(() => controller.abort());
+			return new Response(body, { status: 200 });
+		};
+
+		await expect(loginMistral({ fetch: fetchImpl, signal: controller.signal })).rejects.toBeInstanceOf(
+			LoginCancelledError,
+		);
+	});
+
 	it("times out a stalled console request instead of hanging", async () => {
 		const realTimeout = AbortSignal.timeout.bind(AbortSignal);
 		vi.spyOn(AbortSignal, "timeout").mockImplementation(() => realTimeout(10));

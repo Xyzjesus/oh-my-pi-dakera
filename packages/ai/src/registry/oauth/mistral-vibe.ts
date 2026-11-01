@@ -13,6 +13,7 @@ import { isRecord, ptree } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import { getRetryAfterMsFromHeaders } from "../../utils/retry-after";
+import { throwIfCancelled } from "../engine/common";
 import { type OAuthDeviceCodePollResult, pollOAuthDeviceCodeFlow } from "./device-code";
 import { generatePKCE } from "./pkce";
 import type { OAuthController } from "./types";
@@ -50,10 +51,6 @@ function oauthError(message: string, kind: AIError.OAuthErrorKind, status?: numb
 	return new AIError.OAuthError(message, { kind, provider: PROVIDER, status });
 }
 
-function throwIfCancelled(signal: AbortSignal | undefined): void {
-	if (signal?.aborted) throw new AIError.LoginCancelledError("Login cancelled");
-}
-
 /** POST to the console API; cancellation surfaces as a cancelled login, an unparseable body as `undefined`. */
 async function post(
 	path: string,
@@ -62,7 +59,7 @@ async function post(
 	fetchImpl: FetchImpl,
 ): Promise<{ response: Response; payload: unknown }> {
 	throwIfCancelled(ctrl.signal);
-	let response: Response;
+	let response: Response | undefined;
 	try {
 		response = await fetchImpl(`${CONSOLE_ORIGIN}${API_PATH}${path}`, {
 			method: "POST",
@@ -70,11 +67,12 @@ async function post(
 			body: JSON.stringify(body),
 			signal: ptree.combineSignals(ctrl.signal, REQUEST_TIMEOUT_MS),
 		});
+		return { response, payload: await response.json() };
 	} catch (error) {
 		throwIfCancelled(ctrl.signal);
-		throw error;
+		if (!response) throw error;
+		return { response, payload: undefined };
 	}
-	return { response, payload: await response.json().catch(() => undefined) };
 }
 
 /** Accept only console URLs at or below `basePath` (segment-aware: `/api` rejects `/api-x`). */
