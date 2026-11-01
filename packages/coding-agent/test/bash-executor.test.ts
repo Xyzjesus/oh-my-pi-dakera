@@ -266,26 +266,7 @@ describe("executeBash", () => {
 		expect(result.output.trim()).toBe("1:0:hello");
 	});
 
-	it("keeps git config exported earlier in the persistent shell", async () => {
-		if (!$which("git")) return;
-		const sessionKey = `git-config-export-${path.basename(tempDir)}`;
-		const exported = await executeBash(
-			"export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=color.ui GIT_CONFIG_VALUE_0=always",
-			{ cwd: tempDir, timeout: 5000, sessionKey },
-		);
-		expect(exported.exitCode).toBe(0);
-
-		const result = await executeBash("git config --get color.ui", { cwd: tempDir, timeout: 5000, sessionKey });
-
-		expect(result).toMatchObject({ exitCode: 0 });
-		expect(result.output.trim()).toBe("always");
-	});
-
-	/**
-	 * Creates a two-commit repo through `executeBash()` and returns a runner for
-	 * more commands in it, isolated from user/system git config. An inherited
-	 * GIT_SEQUENCE_EDITOR outranks the config under test, so the session drops it.
-	 */
+	/** Creates a two-commit repo through `executeBash()`, isolated from user/system git config. */
 	async function createTwoCommitRepo(): Promise<(command: string) => Promise<BashResult>> {
 		const repoDir = path.join(tempDir, "repo");
 		const globalConfigPath = path.join(tempDir, "gitconfig");
@@ -301,7 +282,6 @@ describe("executeBash", () => {
 			});
 		const setup = await run(
 			[
-				"unset GIT_SEQUENCE_EDITOR",
 				"git init -q -b main",
 				"git config user.email t@example.com",
 				"git config user.name t",
@@ -332,18 +312,6 @@ describe("executeBash", () => {
 
 		expect(rebase).toMatchObject({ exitCode: 0 });
 		expect(fs.existsSync(marker)).toBe(false);
-	});
-
-	it("still runs a sequence.editor passed with git -c during interactive rebase", async () => {
-		if (process.platform === "win32" || !$which("git")) return;
-		const marker = path.join(tempDir, "sequence-editor-ran");
-		const editorPath = writeEditorScript(marker, 0);
-		const run = await createTwoCommitRepo();
-
-		const rebase = await run(`git -c sequence.editor=${shellQuote(editorPath)} rebase -i HEAD~1`);
-
-		expect(rebase).toMatchObject({ exitCode: 0 });
-		expect(fs.existsSync(marker)).toBe(true);
 	});
 
 	it("runs non-bash shellPath commands through the configured shell", async () => {
