@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -32,6 +32,7 @@ describe("XDG-aware runtime paths", () => {
 	let originalProfile: string | undefined;
 	let originalEnv: Partial<Record<(typeof ENV_KEYS)[number], string>> = {};
 
+	let restoreHomedir = () => {};
 	beforeEach(async () => {
 		originalAgentDir = getAgentDir();
 		originalProfile = process.env.OMP_PROFILE ?? process.env.PI_PROFILE;
@@ -39,6 +40,8 @@ describe("XDG-aware runtime paths", () => {
 		for (const key of ENV_KEYS) originalEnv[key] = process.env[key];
 		tempRoot = path.join(os.tmpdir(), "pi-utils-dirs-xdg", Snowflake.next());
 		configDir = `.omp-dirs-xdg-${Snowflake.next()}`;
+		const homedir = spyOn(os, "homedir").mockReturnValue(tempRoot);
+		restoreHomedir = () => homedir.mockRestore();
 		defaultAgentDir = path.join(os.homedir(), configDir, "agent");
 		await fs.mkdir(tempRoot, { recursive: true });
 		process.env.PI_CONFIG_DIR = configDir;
@@ -58,8 +61,8 @@ describe("XDG-aware runtime paths", () => {
 		}
 		if (originalProfile) setProfile(originalProfile);
 		setAgentDir(originalAgentDir);
+		restoreHomedir();
 		await fs.rm(tempRoot, { recursive: true, force: true });
-		await fs.rm(path.join(os.homedir(), configDir), { recursive: true, force: true });
 	});
 
 	it.skipIf(!xdgPlatform)(
