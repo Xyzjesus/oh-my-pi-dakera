@@ -116,10 +116,14 @@ echo "Using version: $LATEST"
 
 mkdir -p "$INSTALL_DIR"
 
-# Download binary
+# Download binary — to a temp file first: a stalled/interrupted download must
+# never leave a truncated Mach-O at the install path (taskgated SIGKILLs it
+# with "zsh: killed" on every launch until the next successful install).
 BINARY_URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}"
+TMP_BINARY="${INSTALL_DIR}/.omp-dakera.download.$$"
+trap 'rm -f "$TMP_BINARY"' EXIT INT TERM
 echo "Downloading ${BINARY}..."
-curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 30 "$BINARY_URL" -o "${INSTALL_DIR}/omp-dakera"
+curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 30 --retry 3 --retry-delay 2 "$BINARY_URL" -o "$TMP_BINARY"
 
 # Verify against the published SHA256SUMS BEFORE anything modifies the file
 # (the ad-hoc re-sign below rewrites bytes, so this check must run first).
@@ -128,12 +132,12 @@ if SUMS_FILE=$(mktemp) && curl -fsSL --connect-timeout 10 --max-time 60 "$SUMS_U
     EXPECTED=$(grep " ${BINARY}\$" "$SUMS_FILE" | awk '{print $1}')
     if [ -n "$EXPECTED" ]; then
         if command -v sha256sum >/dev/null 2>&1; then
-            ACTUAL=$(sha256sum "${INSTALL_DIR}/omp-dakera" | awk '{print $1}')
+            ACTUAL=$(sha256sum "$TMP_BINARY" | awk '{print $1}')
         else
-            ACTUAL=$(shasum -a 256 "${INSTALL_DIR}/omp-dakera" | awk '{print $1}')
+            ACTUAL=$(shasum -a 256 "$TMP_BINARY" | awk '{print $1}')
         fi
         if [ "$ACTUAL" != "$EXPECTED" ]; then
-            rm -f "${INSTALL_DIR}/omp-dakera" "$SUMS_FILE"
+            rm -f "$SUMS_FILE"
             echo "Checksum mismatch for ${BINARY}: expected $EXPECTED, got $ACTUAL"
             exit 1
         fi
@@ -145,6 +149,9 @@ if SUMS_FILE=$(mktemp) && curl -fsSL --connect-timeout 10 --max-time 60 "$SUMS_U
 else
     echo "Warning: could not download SHA256SUMS — skipping checksum verification"
 fi
+
+mv -f "$TMP_BINARY" "${INSTALL_DIR}/omp-dakera"
+trap - EXIT INT TERM
 
 chmod +x "${INSTALL_DIR}/omp-dakera"
 
