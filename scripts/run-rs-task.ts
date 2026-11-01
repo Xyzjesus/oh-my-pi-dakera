@@ -14,18 +14,8 @@ const RUST_AFFECTING_FILE_NAMES = [
 	"rustfmt.toml",
 	".rustfmt.toml",
 ] as const satisfies readonly string[];
-// The trunks a checkout is measured against: `main` on a fork's `upstream` remote
-// and on `origin`. Remote-tracking refs only, because a local `main` can carry the
-// very commits being checked. Each of these remotes that is configured must call
-// `main` its default branch and have it fetched, and the task runs if the branch
-// changed Rust against any of them: a missing, disagreeing or unconfirmed trunk is
-// uncertainty, not evidence.
-const TRUNK_REMOTES = ["upstream", "origin"] as const satisfies readonly string[];
-// How long the gate waits for a remote to name its default branch. It asks only a
-// remote with no recorded default (`git clone` records one; `git remote add` and
-// `git fetch` do not), and asks them all at once, so a remote that never answers
-// delays the run by this much at most, and the run then goes ahead.
-const REMOTE_ANSWER_TIMEOUT_MS = 10_000;
+// Remote-tracking trunks the branch is diffed against (a local `main` can carry the commits being checked).
+const TRUNKS = ["upstream/main", "origin/main"] as const satisfies readonly string[];
 // Vendored path-patched crates are workspace members for Bazel hermeticity
 // (path-patch rendering is machine-local), but cargo dev tasks keep their
 // historical scope: the forks are not held to workspace format/lint/test gates.
@@ -129,71 +119,32 @@ interface RunDecision {
 	reason: string;
 }
 
-interface TrunkChanges {
-	trunk: string;
-	base: string;
-	/** Rust-affecting paths changed since `base`, committed or not. */
-	rustPaths: string[];
-}
-
-type BranchChanges =
-	| { trunks: TrunkChanges[] }
-	/** `cure`, when known, is a command after which the next run can decide. */
-	| { unknown: string; cure?: string };
-
 type GitResult = { ok: true; text: string } | { ok: false; error: string };
 
 /**
- * Runs the task when this checkout changed anything Rust builds from, and skips
- * it only on a positive answer that it did not. `CI` is not read: most tools take
- * it to mean "non-interactive", which is why omp exports `CI=true` into every
- * agent command, and reading it as "check everything" made each agent's
- * `bun check` lint the whole workspace. No CI job here runs this script (Rust CI
- * is bazel); GitHub Actions and `OMP_FORCE_RUST_TASKS=1` still force a full run.
+ * Runs unless the branch provably changed nothing Rust builds from since its merge base with a trunk.
+ * `CI` is not read: omp exports `CI=true` into every agent command. GitHub Actions and
+ * `OMP_FORCE_RUST_TASKS=1` force a run.
  */
 async function decideWhetherToRun(): Promise<RunDecision> {
 	if (isEnabled(Bun.env.OMP_FORCE_RUST_TASKS)) return { run: true, reason: "OMP_FORCE_RUST_TASKS is set." };
 	// A CI job on `main` has an empty branch diff by definition and must still check everything.
 	if (Bun.env.GITHUB_ACTIONS === "true") return { run: true, reason: "running in GitHub Actions." };
-
-	const changes = await collectBranchChanges();
-	if ("unknown" in changes) {
-		const cure = changes.cure ? ` To let it skip when no Rust changed: ${changes.cure}` : "";
-		return { run: true, reason: `cannot tell what this checkout changed (${changes.unknown}).${cure}` };
-	}
-
-	const changed = changes.trunks.find(trunk => trunk.rustPaths.length > 0);
-	if (changed === undefined) {
-		const since = changes.trunks.map(trunk => `${trunk.base.slice(0, 12)}, the merge base with ${trunk.trunk}`);
+	const changed = await changedPathsSinceTrunk();
+	if (typeof changed === "string")
+		return { run: true, reason: `cannot tell what this checkout changed (${changed}).` };
+	const rust = changed.filter(isRustAffectingPath);
+	if (rust.length === 0) {
 		return {
 			run: false,
-			reason: `no Rust-affecting change since ${since.join(", and since ")}, committed or uncommitted. Set OMP_FORCE_RUST_TASKS=1 to run it anyway.`,
+			reason:
+				"no Rust-affecting change since the merge base with main. Set OMP_FORCE_RUST_TASKS=1 to run it anyway.",
 		};
 	}
-	const more = changed.rustPaths.length > 1 ? ` and ${changed.rustPaths.length - 1} more` : "";
 	return {
 		run: true,
-		reason: `${displayPath(changed.rustPaths[0])}${more} changed since ${changed.base.slice(0, 12)}, the merge base with ${changed.trunk}.`,
+		reason: `${JSON.stringify(rust[0])}${rust.length > 1 ? ` and ${rust.length - 1} more` : ""} changed.`,
 	};
-}
-
-/**
- * A path as shown on the one decision line. Git allows control characters in a
- * path, and a raw newline or escape sequence would split or garble that line.
- */
-function displayPath(changedPath: string): string {
-	let shown = "";
-	let escaped = false;
-	for (const char of changedPath) {
-		const code = char.codePointAt(0) ?? 0;
-		if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
-			shown += `\\x${code.toString(16).padStart(2, "0")}`;
-			escaped = true;
-		} else {
-			shown += char;
-		}
-	}
-	return escaped ? `"${shown}"` : shown;
 }
 
 function isEnabled(value: string | undefined): boolean {
@@ -203,116 +154,29 @@ function isEnabled(value: string | undefined): boolean {
 }
 
 /**
- * What this checkout changed relative to each trunk: everything committed since
- * the merge base (never a two-dot diff against the trunk's tip, which would count
- * the trunk's own newer commits as the branch's), plus staged, unstaged and
- * untracked files. Whatever git cannot answer comes back as `unknown`.
+ * Paths changed since the merge base with each fetched trunk (three-dot, so the trunk's newer commits
+ * do not count), plus uncommitted and untracked files; a string says why that cannot be known.
  */
-async function collectBranchChanges(): Promise<BranchChanges> {
+async function changedPathsSinceTrunk(): Promise<string[] | string> {
 	const shallow = await git("rev-parse", "--is-shallow-repository");
-	if (!shallow.ok) return { unknown: shallow.error };
-	// A shallow clone can hide the true merge base and still hand back an older one,
-	// against which a branch that reverts main's newer Rust commit diffs clean.
-	if (shallow.text.trim() === "true") return { unknown: "shallow clone", cure: "git fetch --unshallow" };
-
-	const remotes = await git("remote");
-	if (!remotes.ok) return { unknown: remotes.error };
-	const configured = new Set(remotes.text.split("\n"));
-	const trunkRemotes = TRUNK_REMOTES.filter(remote => configured.has(remote));
-	if (trunkRemotes.length === 0) {
-		return {
-			unknown: `no ${TRUNK_REMOTES.join(" or ")} remote to diff against`,
-			cure: "git remote add upstream https://github.com/can1357/oh-my-pi && git fetch upstream main:refs/remotes/upstream/main",
-		};
-	}
-
+	if (!shallow.ok) return shallow.error;
+	// A shallow clone can report a stale merge base.
+	if (shallow.text.trim() === "true") return "shallow clone; run git fetch --unshallow";
 	// `--untracked-files=all` lists a new crate's files instead of one `crates/new/` entry.
 	const status = await git("status", "--porcelain", "-z", "--untracked-files=all");
-	if (!status.ok) return { unknown: status.error };
-	const uncommitted = getChangedPathsFromPorcelain(status.text);
-
-	// Asked together, so remotes that never answer cost one timeout, not one each.
-	const defaultBranches = await Promise.all(trunkRemotes.map(getDefaultBranch));
-	const trunks: TrunkChanges[] = [];
-	for (const [index, remote] of trunkRemotes.entries()) {
-		const defaultBranch = defaultBranches[index];
-		// A `main` that is not the remote's trunk is only another branch, and a branch
-		// it already holds diffs clean against it. An unconfirmed `main` is no better.
-		if ("unknown" in defaultBranch) {
-			return {
-				unknown: `could not learn ${remote}'s default branch: ${defaultBranch.unknown}; the Rust half keeps running`,
-			};
-		}
-		if (defaultBranch.branch !== "main") {
-			return {
-				unknown: `${remote}'s default branch is ${defaultBranch.branch}, not main, and this gate compares only against main, so it runs on every check here`,
-			};
-		}
-		const trunk = `${remote}/main`;
-		const tip = await git("rev-parse", "--verify", "--quiet", `refs/remotes/${trunk}^{commit}`);
-		if (!tip.ok) {
-			// The fetch names its destination because a plain `git fetch <remote> main`
-			// only writes FETCH_HEAD when the remote's refspec leaves `main` out, as a
-			// single-branch clone's does.
-			return {
-				unknown: `the ${remote} remote has no fetched main`,
-				cure: `git fetch ${remote} main:refs/remotes/${remote}/main`,
-			};
-		}
-		const mergeBase = await git("merge-base", "HEAD", tip.text.trim());
-		if (!mergeBase.ok) return { unknown: `no merge base between HEAD and ${trunk}` };
-		const base = mergeBase.text.trim();
-		// `--no-renames` reports both sides of a rename, so moving a file out of a crate still counts.
-		const committed = await git("diff", "--no-renames", "--name-only", "-z", base, "HEAD");
-		if (!committed.ok) return { unknown: committed.error };
-		const paths = [...committed.text.split("\0").filter(Boolean), ...uncommitted];
-		trunks.push({ trunk, base, rustPaths: paths.filter(isRustAffectingPath) });
+	if (!status.ok) return status.error;
+	const paths = getChangedPathsFromPorcelain(status.text);
+	let diffed = false;
+	for (const trunk of TRUNKS) {
+		const base = await git("merge-base", "HEAD", `refs/remotes/${trunk}`);
+		if (!base.ok) continue;
+		diffed = true;
+		// `--no-renames` reports both sides, so moving a file out of a crate still counts.
+		const committed = await git("diff", "--no-renames", "--name-only", "-z", base.text.trim(), "HEAD");
+		if (!committed.ok) return committed.error;
+		paths.push(...committed.text.split("\0").filter(Boolean));
 	}
-	return { trunks };
-}
-
-/**
- * The branch `remote` calls its trunk: the `refs/remotes/<remote>/HEAD` that
- * `git clone` records, else the remote's own answer. A remote added with
- * `git remote add` and fetched records none, and guessing `main` for it told a
- * `master` repository to fetch a `main` it does not have.
- */
-async function getDefaultBranch(remote: string): Promise<{ branch: string } | { unknown: string }> {
-	const prefix = `refs/remotes/${remote}/`;
-	const recorded = await git("symbolic-ref", "--quiet", `${prefix}HEAD`);
-	if (recorded.ok) return { branch: recorded.text.trim().slice(prefix.length) };
-	const advertised = await gitAskingRemote("ls-remote", "--symref", remote, "HEAD");
-	if (!advertised.ok) return { unknown: advertised.error };
-	const branch = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(advertised.text)?.[1];
-	return branch === undefined ? { unknown: "its answer names none" } : { branch };
-}
-
-/**
- * `git` for a command that talks to a remote: it never prompts, and it gives up
- * after REMOTE_ANSWER_TIMEOUT_MS. A timeout stops git without waiting for its
- * output streams, so a remote that never answers cannot delay the Rust gate.
- */
-async function gitAskingRemote(...args: string[]): Promise<GitResult> {
-	const child = Bun.spawn(["git", ...args], {
-		cwd: repoRoot,
-		env: { ...Bun.env, GIT_TERMINAL_PROMPT: "0" },
-		stdin: "ignore",
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const finished = Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
-	const { promise: timedOut, resolve } = Promise.withResolvers<"timed out">();
-	const timer = setTimeout(() => resolve("timed out"), REMOTE_ANSWER_TIMEOUT_MS);
-	const outcome = await Promise.race([finished, timedOut]);
-	clearTimeout(timer);
-	if (outcome === "timed out") {
-		child.kill("SIGKILL");
-		return { ok: false, error: `git ${args[0]} got no answer within ${REMOTE_ANSWER_TIMEOUT_MS / 1000} s` };
-	}
-	const [exitCode, stdout, stderr] = outcome;
-	if (exitCode === 0) return { ok: true, text: stdout };
-	const firstLine = stderr.trim().split("\n")[0];
-	return { ok: false, error: `git ${args[0]}: ${firstLine || `exit ${exitCode}`}` };
+	return diffed ? paths : `no fetched ${TRUNKS.join(" or ")}`;
 }
 
 async function git(...args: string[]): Promise<GitResult> {
