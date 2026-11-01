@@ -148,18 +148,35 @@ describe.skipIf(process.platform === "win32")("run-rs-task.ts check:rs", () => {
 		CASE_TIMEOUT_MS,
 	);
 
-	// Failure mode: `git status` folds an untracked directory into one `crates/y/`
-	// entry, so a brand-new crate looks like no Rust change at all.
+	// Failure mode: a gate that runs the Rust half for any dirty tree charges every
+	// TypeScript edit a full `cargo clippy --workspace`.
+	test(
+		"an uncommitted TypeScript edit skips the Rust gate",
+		async () => {
+			const fixture = await makeFixture();
+			await Bun.write(path.join(fixture.work, "packages/app/src/a.ts"), "export const a = 4;\n");
+
+			const result = await runCheckRs(fixture, fixture.work);
+
+			expect(result.cargoRan).toBe(false);
+			expect(result.output).toContain("Skipping check:rs");
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: `git status` folds an untracked directory into one
+	// `crates/newcrate/` entry, so a brand-new crate looks like no Rust change at all.
 	test(
 		"a new untracked crate runs the Rust gate",
 		async () => {
 			const fixture = await makeFixture();
-			await Bun.write(path.join(fixture.work, "crates/y/src/lib.rs"), "pub fn y() {}\n");
+			await Bun.write(path.join(fixture.work, "crates/newcrate/Cargo.toml"), '[package]\nname = "newcrate"\n');
+			await Bun.write(path.join(fixture.work, "crates/newcrate/src/lib.rs"), "pub fn y() {}\n");
 
 			const result = await runCheckRs(fixture, fixture.work);
 
 			expect(result.cargoRan).toBe(true);
-			expect(result.output).toContain("crates/y/src/lib.rs");
+			expect(result.output).toContain("crates/newcrate/");
 		},
 		CASE_TIMEOUT_MS,
 	);
@@ -184,10 +201,10 @@ describe.skipIf(process.platform === "win32")("run-rs-task.ts check:rs", () => {
 		CASE_TIMEOUT_MS,
 	);
 
-	// Failure mode: actions/checkout clones at depth 1 by default; a gate that
-	// skipped there because it found no difference would switch off CI's Rust gate.
+	// Failure mode: a gate that gives up on every shallow clone charges the full Rust
+	// half, on every `bun check`, to anyone who cloned with `--depth`.
 	test(
-		"a shallow clone runs the Rust gate and says it cannot tell",
+		"a shallow clone that reaches its merge base skips a TypeScript-only commit",
 		async () => {
 			const fixture = await makeFixture();
 			const shallow = path.join(fixture.root, "shallow");
@@ -196,16 +213,49 @@ describe.skipIf(process.platform === "win32")("run-rs-task.ts check:rs", () => {
 
 			const result = await runCheckRs(fixture, shallow);
 
-			expect(result.cargoRan).toBe(true);
-			expect(result.output).toContain("shallow");
+			expect(result.cargoRan).toBe(false);
+			expect(result.output).toContain("Skipping check:rs");
 		},
 		CASE_TIMEOUT_MS,
 	);
 
-	// Failure mode: a checkout with nothing to diff against (no remote, a one-commit
-	// repository) reads as "no change" and skips.
+	// Failure mode: actions/checkout clones at depth 1 by default. A gate that read
+	// "no common ancestor in the fetched history" as "no change" would switch off the
+	// Rust gate there; one that ran without saying how to stop it would run forever.
 	test(
-		"a repository with no main ref to diff against runs the Rust gate",
+		"a shallow clone cut above its merge base runs the Rust gate and names the cure",
+		async () => {
+			const fixture = await makeFixture();
+			await git(fixture.origin, "switch", "-q", "-c", "feature", "HEAD~1");
+			await commitFile(fixture.origin, "packages/app/src/a.ts", "export const a = 3;\n", "ts change");
+			await git(fixture.origin, "switch", "-q", "main");
+			const shallow = path.join(fixture.root, "shallow");
+			await git(
+				fixture.root,
+				"clone",
+				"-q",
+				"--depth",
+				"1",
+				"--no-single-branch",
+				`file://${fixture.origin}`,
+				shallow,
+			);
+			await git(shallow, "switch", "-q", "feature");
+
+			const result = await runCheckRs(fixture, shallow);
+
+			expect(result.cargoRan).toBe(true);
+			expect(result.output).toContain("shallow clone");
+			expect(result.output).toContain("git fetch --unshallow");
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	// Failure mode: a checkout with nothing to diff against (no remote, a renamed
+	// remote, a one-commit repository) reads as "no change" and skips; or it runs
+	// on every `bun check` without saying how to make it stop.
+	test(
+		"a repository with no main ref to diff against runs the Rust gate and names the cure",
 		async () => {
 			const fixture = await makeFixture();
 			const lone = path.join(fixture.root, "lone");
@@ -218,6 +268,7 @@ describe.skipIf(process.platform === "win32")("run-rs-task.ts check:rs", () => {
 
 			expect(result.cargoRan).toBe(true);
 			expect(result.output).toContain("cannot tell");
+			expect(result.output).toContain("git remote add upstream");
 		},
 		CASE_TIMEOUT_MS,
 	);

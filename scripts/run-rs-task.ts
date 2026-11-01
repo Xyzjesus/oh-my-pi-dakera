@@ -121,15 +121,20 @@ interface RunDecision {
 	reason: string;
 }
 
-type BranchChanges = { trunk: string; base: string; paths: string[] } | { unknown: string };
+type BranchChanges =
+	| { trunk: string; base: string; paths: string[] }
+	/** `cure`, when known, is a command after which the next run can decide. */
+	| { unknown: string; cure?: string };
 
 type GitResult = { ok: true; text: string } | { ok: false; error: string };
 
 /**
  * Runs the task when this checkout changed anything Rust builds from, and skips
- * it only on a positive answer that it did not. `CI` is deliberately not read:
- * omp exports `CI=true` into every agent command, so treating it as "run
- * everything" made each agent's `bun check` lint the whole workspace.
+ * it only on a positive answer that it did not. `CI` is not read: most tools take
+ * it to mean "non-interactive", which is why omp exports `CI=true` into every
+ * agent command, and reading it as "check everything" made each agent's
+ * `bun check` lint the whole workspace. No CI job here runs this script (Rust CI
+ * is bazel); GitHub Actions and `OMP_FORCE_RUST_TASKS=1` still force a full run.
  */
 async function decideWhetherToRun(): Promise<RunDecision> {
 	if (isEnabled(Bun.env.OMP_FORCE_RUST_TASKS)) return { run: true, reason: "OMP_FORCE_RUST_TASKS is set." };
@@ -137,8 +142,10 @@ async function decideWhetherToRun(): Promise<RunDecision> {
 	if (Bun.env.GITHUB_ACTIONS === "true") return { run: true, reason: "running in GitHub Actions." };
 
 	const changes = await collectBranchChanges();
-	if ("unknown" in changes)
-		return { run: true, reason: `cannot tell what this checkout changed (${changes.unknown}).` };
+	if ("unknown" in changes) {
+		const cure = changes.cure ? ` To let it skip when no Rust changed: ${changes.cure}` : "";
+		return { run: true, reason: `cannot tell what this checkout changed (${changes.unknown}).${cure}` };
+	}
 
 	const since = `since ${changes.base.slice(0, 12)}, the merge base with ${changes.trunk}`;
 	const rustPaths = changes.paths.filter(isRustAffectingPath);
@@ -165,19 +172,30 @@ function isEnabled(value: string | undefined): boolean {
  * untracked files. Whatever git cannot answer comes back as `unknown`.
  */
 async function collectBranchChanges(): Promise<BranchChanges> {
-	const shallow = await git("rev-parse", "--is-shallow-repository");
-	if (!shallow.ok) return { unknown: shallow.error };
-	// A cut history can hide the merge base, or the commits after it.
-	if (shallow.text.trim() === "true") return { unknown: "shallow clone" };
-
 	const refs = await git("for-each-ref", "--format=%(refname)", ...TRUNK_REFS.map(ref => `refs/remotes/${ref}`));
 	if (!refs.ok) return { unknown: refs.error };
 	const present = new Set(refs.text.split("\n"));
 	const trunk = TRUNK_REFS.find(ref => present.has(`refs/remotes/${ref}`));
-	if (trunk === undefined) return { unknown: `no ${TRUNK_REFS.join(" or ")} ref to diff against` };
+	if (trunk === undefined) {
+		return {
+			unknown: `no ${TRUNK_REFS.join(" or ")} ref to diff against`,
+			cure: "git remote add upstream https://github.com/can1357/oh-my-pi && git fetch upstream main",
+		};
+	}
 
+	// In a shallow clone `merge-base` still answers when the fetched history holds a
+	// common ancestor; when the cut hides every one, it finds none and the diff is unknown.
 	const mergeBase = await git("merge-base", "HEAD", `refs/remotes/${trunk}`);
-	if (!mergeBase.ok) return { unknown: `no merge base between HEAD and ${trunk}` };
+	if (!mergeBase.ok) {
+		const shallow = await git("rev-parse", "--is-shallow-repository");
+		if (shallow.ok && shallow.text.trim() === "true") {
+			return {
+				unknown: `this shallow clone does not reach its merge base with ${trunk}`,
+				cure: "git fetch --unshallow",
+			};
+		}
+		return { unknown: `no merge base between HEAD and ${trunk}` };
+	}
 	const base = mergeBase.text.trim();
 
 	// `--no-renames` reports both sides of a rename, so moving a file out of a crate still counts.
