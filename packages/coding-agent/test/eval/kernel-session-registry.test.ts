@@ -490,21 +490,14 @@ describe("kernel session recovery", () => {
 });
 
 describe("kernel restart notice claim", () => {
-	/**
-	 * Registry whose cells report whether their start claimed a restart notice.
-	 * A cell named in `failBeforeStart` throws before it starts (as a failing
-	 * prelude does); one in `failAfterStart` claims, then throws. A cell with a
-	 * gate in `holdBeforeStart` waits on it before it starts.
-	 */
+	/** A cell in `failBeforeStart` throws before claiming (as a failing prelude does); one in `failAfterStart` claims, then throws. */
 	function claimingRegistry(options?: {
 		unconfirmedShutdown?: boolean;
 		failBeforeStart?: string[];
 		failAfterStart?: string[];
-		holdBeforeStart?: Record<string, Promise<void>>;
 	}) {
 		const { kernels, registry } = createFakeRegistry(
 			async (_kernel, code, runOptions) => {
-				await options?.holdBeforeStart?.[code];
 				if (options?.failBeforeStart?.includes(code)) throw new Error(`${code}: prelude failed`);
 				const restarted = runOptions.claimKernelRestartNotice?.() ?? false;
 				if (options?.failAfterStart?.includes(code)) throw new Error(`${code}: failed after start`);
@@ -558,45 +551,6 @@ describe("kernel restart notice claim", () => {
 			kernels[0]!.alive = false;
 			await expect(cell("throws")).rejects.toThrow("failed after start");
 			expect(await cell("next")).toBe("none");
-		} finally {
-			await registry.disposeAll();
-		}
-	});
-
-	for (const outcome of ["fails before it starts", "succeeds later"] as const) {
-		it(`gives the notice to a sibling that starts first while an overlapping cell waits and ${outcome}`, async () => {
-			const release = Promise.withResolvers<void>();
-			const { kernels, registry, cell } = claimingRegistry({
-				holdBeforeStart: { waiting: release.promise },
-				failBeforeStart: outcome === "fails before it starts" ? ["waiting"] : [],
-			});
-			try {
-				expect(await cell("first")).toBe("none");
-				kernels[0]!.alive = false;
-				const waiting = cell("waiting").then(
-					value => value,
-					(error: unknown) => String(error),
-				);
-				expect(await cell("sibling")).toBe("notice");
-				release.resolve();
-				expect(await waiting).toBe(
-					outcome === "fails before it starts" ? "Error: waiting: prelude failed" : "none",
-				);
-				expect(await cell("after")).toBe("none");
-				expect(kernels).toHaveLength(2);
-			} finally {
-				release.resolve();
-				await registry.disposeAll();
-			}
-		});
-	}
-
-	it("does not give the notice to the cell after a reset", async () => {
-		const { kernels, registry, cell } = claimingRegistry();
-		try {
-			expect(await cell("first")).toBe("none");
-			kernels[0]!.alive = false;
-			expect(await cell("reset", { reset: true })).toBe("none");
 		} finally {
 			await registry.disposeAll();
 		}

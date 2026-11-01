@@ -119,10 +119,8 @@ interface StartingJsSession extends SessionOwners {
 const sessions = new Map<string, JsSession>();
 const startingSessions = new Map<string, StartingJsSession>();
 const resettingSessions = new Map<string, Promise<void>>();
-// Session keys whose worker died outside reset and disposal (a worker error, or
-// an abort that killed it), with the owners it had. The next cell on the key
-// runs on a new worker and must say that earlier state is gone.
-const lostSessions = new Map<string, Pick<SessionOwners, "ownerIds">>();
+// Owners of session keys whose worker died outside reset/disposal; the next cell announces the loss.
+const lostSessions = new Map<string, Set<string>>();
 // Worker startup (module-graph import + WorkerCore construction) is infrastructure
 // cost, not user compute. Floor it independently of Bun's 5s default per-test timeout
 // so a slow cold-start under load isn't aborted mid-init — terminating a still-
@@ -442,10 +440,8 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 		}
 		starting.ownerIds.delete(ownerId);
 	}
-	for (const [sessionKey, lost] of Array.from(lostSessions.entries())) {
-		if (!lost.ownerIds.has(ownerId)) continue;
-		if (lost.ownerIds.size === 1) lostSessions.delete(sessionKey);
-		else lost.ownerIds.delete(ownerId);
+	for (const [sessionKey, ownerIds] of lostSessions) {
+		if (ownerIds.delete(ownerId) && ownerIds.size === 0) lostSessions.delete(sessionKey);
 	}
 	for (const session of toKill) {
 		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
@@ -887,7 +883,7 @@ function settlePending(session: JsSession, msg: Extract<WorkerOutbound, { type: 
 async function killSessionFor(session: JsSession, error: Error, options: { force: boolean }): Promise<void> {
 	if (sessions.get(session.sessionKey) === session) {
 		sessions.delete(session.sessionKey);
-		lostSessions.set(session.sessionKey, { ownerIds: new Set(session.ownerIds) });
+		lostSessions.set(session.sessionKey, new Set(session.ownerIds));
 	}
 	await killSession(session, error, options);
 }

@@ -142,13 +142,7 @@ export function createKernelSessionRegistry<
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
 	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
-	// The kernel each session record's latest cell started on. A cell that starts
-	// on a different live kernel runs on a replacement for one that died in
-	// between and carries the notice; the executor keeps it in that cell's result
-	// even when the cell fails, so it is never handed back. A cell that fails
-	// before it starts (prelude setup, cancellation) claims nothing, so the notice
-	// goes to the first cell that does start. Reset and disposal make a new
-	// record, so they never look like a restart.
+	// Kernel each session record's latest started cell ran on; a different live kernel means the old one died.
 	const servedKernels = new WeakMap<TSession, TKernel>();
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
@@ -363,7 +357,7 @@ export function createKernelSessionRegistry<
 				cwd: session.cwd,
 				reason,
 			});
-			// Intentional disposal: a later replacement of this kernel is no surprise restart.
+			// Intentional disposal: a later replacement is no surprise restart.
 			servedKernels.delete(session);
 			if (!sessions.has(id)) sessions.set(id, session);
 		}
