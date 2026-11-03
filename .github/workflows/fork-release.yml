@@ -166,7 +166,9 @@ jobs:
             # Each runner builds only its own targets, so the glob stages
             # exactly this job's binaries (darwin stages both darwin ones).
             cp packages/coding-agent/binaries/omp-* dist/
-            git rev-parse HEAD > "dist/omp-${{ matrix.target_id }}.commit"
+            for file in packages/coding-agent/binaries/omp-*; do
+              git rev-parse HEAD > "dist/$(basename "$file").commit"
+            done
 
          - uses: actions/upload-artifact@v4
            with:
