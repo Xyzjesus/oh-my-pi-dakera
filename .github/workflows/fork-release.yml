@@ -166,9 +166,14 @@ jobs:
             # Each runner builds only its own targets, so the glob stages
             # exactly this job's binaries (darwin stages both darwin ones).
             cp packages/coding-agent/binaries/omp-* dist/
-            for file in packages/coding-agent/binaries/omp-*; do
-              git rev-parse HEAD > "dist/$(basename "$file").commit"
-            done
+            if [ "${{ matrix.target_id }}" = "darwin" ]; then
+              # Both darwin binaries build on one runner: keep the per-target
+              # stamp names the release asset set has always shipped.
+              git rev-parse HEAD > dist/omp-darwin-arm64.commit
+              git rev-parse HEAD > dist/omp-darwin-x64.commit
+            else
+              git rev-parse HEAD > "dist/omp-${{ matrix.target_id }}.commit"
+            fi
 
          - uses: actions/upload-artifact@v4
            with:
