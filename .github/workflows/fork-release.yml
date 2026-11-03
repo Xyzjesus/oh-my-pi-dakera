@@ -37,33 +37,23 @@ jobs:
          matrix:
             include:
                - os: macos-15
-                 target_id: darwin-arm64
+                 target_id: darwin
                  platform: darwin
-                 binary_path: packages/coding-agent/binaries/omp-darwin-arm64
-               - os: macos-15
-                 target_id: darwin-x64
-                 platform: darwin
-                 binary_path: packages/coding-agent/binaries/omp-darwin-x64
                - os: ubuntu-24.04
                  target_id: linux-x64
                  platform: linux
-                 binary_path: packages/coding-agent/binaries/omp-linux-x64
                - os: ubuntu-24.04-arm
                  target_id: linux-arm64
                  platform: linux
-                 binary_path: packages/coding-agent/binaries/omp-linux-arm64
                - os: ubuntu-24.04
                  target_id: win32-x64
                  platform: win32
-                 binary_path: packages/coding-agent/binaries/omp-windows-x64.exe
                - os: ubuntu-24.04
                  target_id: linux-musl-x64
                  platform: linux
-                 binary_path: packages/coding-agent/binaries/omp-linux-musl-x64
                - os: ubuntu-24.04-arm
                  target_id: linux-musl-arm64
                  platform: linux
-                 binary_path: packages/coding-agent/binaries/omp-linux-musl-arm64
       steps:
          - uses: actions/checkout@v4
            with:
@@ -82,13 +72,13 @@ jobs:
          - run: bun install --frozen-lockfile
 
          - name: Build native addon (host cargo)
-           if: matrix.target_id != 'darwin-x64' && matrix.target_id != 'win32-x64' && matrix.target_id != 'linux-musl-x64' && matrix.target_id != 'linux-musl-arm64'
+           if: matrix.target_id != 'win32-x64' && matrix.target_id != 'linux-musl-x64' && matrix.target_id != 'linux-musl-arm64'
            run: bun --cwd=packages/natives run build
            env:
               OMP_NATIVE_CARGO_PROFILE: local
 
          - name: Build native addon (cross cargo)
-           if: matrix.target_id == 'darwin-x64'
+           if: matrix.target_id == 'darwin'
            run: |
               set -euo pipefail
               rustup target add x86_64-apple-darwin
@@ -128,7 +118,7 @@ jobs:
 
          - name: Build release binary
            env:
-              RELEASE_TARGETS: ${{ matrix.target_id }}
+              RELEASE_TARGETS: ${{ matrix.target_id == 'darwin' && 'darwin-arm64,darwin-x64' || matrix.target_id }}
               # No Apple signing secrets in the fork: compile-binary's own
               # MACOS_SIGNING guard skips codesigning when this is unset/empty.
               MACOS_SIGNING: ""
@@ -138,7 +128,9 @@ jobs:
            if: matrix.target_id != 'win32-x64' && matrix.target_id != 'linux-musl-x64' && matrix.target_id != 'linux-musl-arm64'
            run: |
               runtime_dir="$(mktemp -d)"
-              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --version
+              for binary in packages/coding-agent/binaries/omp-*; do
+                 HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "$binary" --version
+              done
 
          # Upstream's --smoke-test starts the tiny-title worker, which binds only
          # AFTER fetching the ~214MB LFM2.5 model from HuggingFace into the probe's
@@ -153,23 +145,27 @@ jobs:
            if: matrix.target_id != 'win32-x64' && matrix.target_id != 'linux-musl-x64' && matrix.target_id != 'linux-musl-arm64'
            run: |
               runtime_dir="$(mktemp -d)"
-              binary="${{ matrix.binary_path }}"
               export HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg"
-              "$binary" --smoke-test || true
-              ok=0
-              for attempt in 1 2 3; do
-                 if "$binary" --smoke-test; then ok=1; break; fi
-                 echo "smoke attempt $attempt failed (model cache resumes across attempts)"
+              for binary in packages/coding-agent/binaries/omp-*; do
+                 # First pass warms the tiny-model cache (partial HF downloads
+                 # resume); the strict retries must pass.
+                 "$binary" --smoke-test || true
+                 ok=0
+                 for attempt in 1 2 3; do
+                    if "$binary" --smoke-test; then ok=1; break; fi
+                    echo "smoke attempt $attempt failed for $binary (model cache resumes across attempts)"
+                 done
+                 [ "$ok" = "1" ]
               done
-              [ "$ok" = "1" ]
 
          - name: Stage artifact
            shell: bash
            run: |
             set -euo pipefail
-            test -f "${{ matrix.binary_path }}"
             mkdir -p dist
-            cp "${{ matrix.binary_path }}" dist/
+            # Each runner builds only its own targets, so the glob stages
+            # exactly this job's binaries (darwin stages both darwin ones).
+            cp packages/coding-agent/binaries/omp-* dist/
             git rev-parse HEAD > "dist/omp-${{ matrix.target_id }}.commit"
 
          - uses: actions/upload-artifact@v4
