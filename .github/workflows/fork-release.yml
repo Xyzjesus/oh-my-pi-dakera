@@ -134,12 +134,34 @@ jobs:
               MACOS_SIGNING: ""
            run: bun run ci:release:build-binaries
 
-         - name: Smoke (host-runnable only)
+         - name: Binary --version (host-runnable, strict)
            if: matrix.target_id != 'win32-x64' && matrix.target_id != 'linux-musl-x64' && matrix.target_id != 'linux-musl-arm64'
            run: |
               runtime_dir="$(mktemp -d)"
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --version
-              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --smoke-test
+
+         # Upstream's --smoke-test starts the tiny-title worker, which binds only
+         # AFTER fetching the ~214MB LFM2.5 model from HuggingFace into the probe's
+         # fresh HOME. On a cold runner cache that download races the worker's
+         # hardcoded 30s bind window (SMOKE_TEST_TIMEOUT_MS) and loses whenever HF
+         # is slow — v18.16.0-dakera.1 lost that race on both linux jobs with
+         # healthy binaries (reproduced on pristine upstream/main, no dakera code).
+         # The first pass only warms the cache (partial HF downloads resume across
+         # runs); the strict retries must then pass, so genuine worker breakage
+         # still fails the release.
+         - name: Smoke (host-runnable only)
+           if: matrix.target_id != 'win32-x64' && matrix.target_id != 'linux-musl-x64' && matrix.target_id != 'linux-musl-arm64'
+           run: |
+              runtime_dir="$(mktemp -d)"
+              binary="${{ matrix.binary_path }}"
+              export HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg"
+              "$binary" --smoke-test || true
+              ok=0
+              for attempt in 1 2 3; do
+                 if "$binary" --smoke-test; then ok=1; break; fi
+                 echo "smoke attempt $attempt failed (model cache resumes across attempts)"
+              done
+              [ "$ok" = "1" ]
 
          - name: Stage artifact
            shell: bash
