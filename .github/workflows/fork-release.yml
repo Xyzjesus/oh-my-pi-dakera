@@ -28,7 +28,7 @@ jobs:
       name: build ${{ matrix.target_id }}
       # Mirrors upstream's release_build matrix, minus Apple-signing and bazel
       # native caches: in the fork, native addons build inline via bun (the
-      # pi-natives package ships prebuilds for the big three; where it does
+      # omp-natives package ships prebuilds for the big three; where it does
       # not, this job is allowed to fail and the release ships without that
       # platform — fail-fast is off on purpose).
       runs-on: ${{ matrix.os }}
@@ -86,7 +86,7 @@ jobs:
               # baseline=x86-64-v2; embed-native requires BOTH variant files.
               for VARIANT in modern baseline; do
                 CPU=$([ "$VARIANT" = "modern" ] && echo "x86-64-v3" || echo "x86-64-v2")
-                RUSTFLAGS="-C target-cpu=$CPU" cargo build --profile local --target x86_64-apple-darwin -p pi-natives
+                RUSTFLAGS="-C target-cpu=$CPU" cargo build --profile local --target x86_64-apple-darwin -p omp-natives
                 cp target/x86_64-apple-darwin/local/libpi_natives.dylib \
                    "packages/natives/native/pi_natives.darwin-x64-$VARIANT.node"
               done
@@ -185,6 +185,8 @@ jobs:
    release:
       name: checksums + GitHub Release
       needs: build
+      # A failed matrix leg must not skip the release (fail-fast is off on purpose).
+      if: ${{ !cancelled() }}
       runs-on: ubuntu-24.04
       steps:
          - uses: actions/checkout@v4
